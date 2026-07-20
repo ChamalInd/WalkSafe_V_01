@@ -3,6 +3,7 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 
 export const unstable_settings = {
   anchor: "(app)",
@@ -10,11 +11,12 @@ export const unstable_settings = {
 
 function RootNavigator() {
   const { user, initializing } = useAuth();
+  const { colors } = useTheme();
 
   if (initializing) {
     return (
-      <View style={styles.loading}>
-        <ActivityIndicator size="large" />
+      <View style={[styles.loading, { backgroundColor: colors.background }]}>
+        <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }
@@ -32,12 +34,19 @@ function RootNavigator() {
   );
 }
 
+function ThemedStatusBar() {
+  const { isDark } = useTheme();
+  return <StatusBar style={isDark ? "light" : "dark"} />;
+}
+
 export default function RootLayout() {
   return (
-    <AuthProvider>
-      <RootNavigator />
-      <StatusBar style="auto" />
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <RootNavigator />
+        <ThemedStatusBar />
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 
