@@ -130,6 +130,18 @@ export default function ScheduleScreen() {
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
   const mapRef = useRef<MapView>(null);
+  const suppressRegion = useRef(false);
+
+  function animateTo(region: { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number }) {
+    suppressRegion.current = true;
+    setMapRegion(region);
+    mapRef.current?.animateToRegion(region, 300);
+    setTimeout(() => { suppressRegion.current = false; }, 400);
+  }
+
+  function handleRegionChange(region: { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number }) {
+    if (!suppressRegion.current) setMapRegion(region);
+  }
 
   useEffect(() => {
     if (currentLocation && !originSet.current) {
@@ -137,7 +149,7 @@ export default function ScheduleScreen() {
       reverseGeocode(currentLocation.latitude, currentLocation.longitude).then((addr) => {
         setOrigin({ latitude: currentLocation.latitude, longitude: currentLocation.longitude, address: addr });
         setOriginText(addr.split(",")[0]);
-        setMapRegion((prev) => ({ ...prev, latitude: currentLocation.latitude, longitude: currentLocation.longitude }));
+        animateTo({ latitude: currentLocation.latitude, longitude: currentLocation.longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 });
       });
     }
   }, [currentLocation]);
@@ -162,7 +174,7 @@ export default function ScheduleScreen() {
     if (stage === "confirmation" && userConfirmed && partnerConfirmed) {
       const timer = setTimeout(() => {
         setStage("navigating");
-        if (currentLocation) setMapRegion((prev) => ({ ...prev, latitude: currentLocation.latitude, longitude: currentLocation.longitude, latitudeDelta: 0.005, longitudeDelta: 0.005 }));
+        if (currentLocation) animateTo({ latitude: currentLocation.latitude, longitude: currentLocation.longitude, latitudeDelta: 0.005, longitudeDelta: 0.005 });
       }, 1500);
       return () => clearTimeout(timer);
     }
@@ -178,12 +190,12 @@ export default function ScheduleScreen() {
 
   function handleOriginSelect(s: { latitude: number; longitude: number; title: string }) {
     setOrigin({ latitude: s.latitude, longitude: s.longitude, address: s.title });
-    setMapRegion((prev) => ({ ...prev, latitude: s.latitude, longitude: s.longitude }));
+    animateTo({ ...mapRegion, latitude: s.latitude, longitude: s.longitude });
   }
 
   function handleDestSelect(s: { latitude: number; longitude: number; title: string }) {
     setDestination({ latitude: s.latitude, longitude: s.longitude, address: s.title });
-    setMapRegion((prev) => ({ ...prev, latitude: s.latitude, longitude: s.longitude }));
+    animateTo({ ...mapRegion, latitude: s.latitude, longitude: s.longitude });
   }
 
   async function handleMarkerDrag(lat: number, lon: number) {
@@ -212,14 +224,14 @@ export default function ScheduleScreen() {
       if (parsed.length > 0) {
         const allLats = parsed.flatMap((r) => r.geometry.map((p) => p.latitude));
         const allLngs = parsed.flatMap((r) => r.geometry.map((p) => p.longitude));
-        setMapRegion({ latitude: (Math.min(...allLats) + Math.max(...allLats)) / 2, longitude: (Math.min(...allLngs) + Math.max(...allLngs)) / 2, latitudeDelta: (Math.max(...allLats) - Math.min(...allLats)) * 0.3 + 0.01, longitudeDelta: (Math.max(...allLngs) - Math.min(...allLngs)) * 0.3 + 0.01 });
+        animateTo({ latitude: (Math.min(...allLats) + Math.max(...allLats)) / 2, longitude: (Math.min(...allLngs) + Math.max(...allLngs)) / 2, latitudeDelta: (Math.max(...allLats) - Math.min(...allLats)) * 0.3 + 0.01, longitudeDelta: (Math.max(...allLngs) - Math.min(...allLngs)) * 0.3 + 0.01 });
       }
     } catch { setRoutesError("Failed to calculate routes. Please try again."); setRoutes([]); } finally { setRoutesLoading(false); }
   }
 
   function handleBack() {
     setStage("selecting"); setRoutes([]); setRoutesError(null);
-    if (origin) setMapRegion((prev) => ({ ...prev, latitude: origin.latitude, longitude: origin.longitude }));
+    if (origin) animateTo({ ...mapRegion, latitude: origin.latitude, longitude: origin.longitude });
   }
 
   function handleBackToRoutes() {
@@ -227,7 +239,7 @@ export default function ScheduleScreen() {
     if (routes.length > 0) {
       const allLats = routes.flatMap((r) => r.geometry.map((p) => p.latitude));
       const allLngs = routes.flatMap((r) => r.geometry.map((p) => p.longitude));
-      setMapRegion({ latitude: (Math.min(...allLats) + Math.max(...allLats)) / 2, longitude: (Math.min(...allLngs) + Math.max(...allLngs)) / 2, latitudeDelta: (Math.max(...allLats) - Math.min(...allLats)) * 0.3 + 0.01, longitudeDelta: (Math.max(...allLngs) - Math.min(...allLngs)) * 0.3 + 0.01 });
+      animateTo({ latitude: (Math.min(...allLats) + Math.max(...allLats)) / 2, longitude: (Math.min(...allLngs) + Math.max(...allLngs)) / 2, latitudeDelta: (Math.max(...allLats) - Math.min(...allLats)) * 0.3 + 0.01, longitudeDelta: (Math.max(...allLngs) - Math.min(...allLngs)) * 0.3 + 0.01 });
     }
   }
 
@@ -246,7 +258,7 @@ export default function ScheduleScreen() {
         </View>
 
         <View style={s.mapSection}>
-          <MapView ref={mapRef} style={s.map} region={mapRegion} onRegionChangeComplete={setMapRegion} onPress={stage === "selecting" ? handleMapPress : undefined}>
+          <MapView ref={mapRef} style={s.map} region={mapRegion} onRegionChangeComplete={handleRegionChange} onPress={stage === "selecting" ? handleMapPress : undefined}>
             {origin && <Marker coordinate={{ latitude: origin.latitude, longitude: origin.longitude }} title="Start" description={origin.address} pinColor={colors.success} />}
             {destination && <Marker coordinate={{ latitude: destination.latitude, longitude: destination.longitude }} title="Destination" description={destination.address} pinColor={colors.danger} draggable={stage === "selecting"} onDragEnd={stage === "selecting" ? (e) => handleMarkerDrag(e.nativeEvent.coordinate.latitude, e.nativeEvent.coordinate.longitude) : undefined} />}
             {stage === "routes" && routes.map((route, i) => <Polyline key={i} coordinates={route.geometry} strokeColor={i === selectedRoute ? ROUTE_COLORS[i] : colors.textTertiary} strokeWidth={i === selectedRoute ? 5 : 3} />)}
@@ -337,7 +349,7 @@ export default function ScheduleScreen() {
               </View>
             </View>
             {!userConfirmed ? (
-              <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success }]} onPress={() => setUserConfirmed(true)}>
+              <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success, marginHorizontal: 0, paddingVertical: 18 }]} onPress={() => setUserConfirmed(true)}>
                 <Text style={s.primaryBtnText}>I&apos;ve Arrived</Text><Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
               </TouchableOpacity>
             ) : !partnerConfirmed ? (
@@ -394,7 +406,7 @@ export default function ScheduleScreen() {
             <Ionicons name="checkmark-done-circle" size={72} color={colors.success} />
             <Text style={[s.feedbackThanks, { color: colors.text }]}>Thank You!</Text>
             <Text style={[s.feedbackThanksSub, { color: colors.textSecondary }]}>Your feedback helps keep the WalkSafe community safe.</Text>
-            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.primary }]} onPress={() => { setStage("selecting"); setDestination(null); setDestText(""); setRoutes([]); setSelectedRoute(0); setSelectedWalker(null); setUserConfirmed(false); setPartnerConfirmed(false); setFeedbackRating(0); setFeedbackText(""); setFeedbackSubmitted(false); setRemainingDistance(0); if (origin) setMapRegion((prev) => ({ ...prev, latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 })); }}>
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.primary }]} onPress={() => { setStage("selecting"); setDestination(null); setDestText(""); setRoutes([]); setSelectedRoute(0); setSelectedWalker(null); setUserConfirmed(false); setPartnerConfirmed(false); setFeedbackRating(0); setFeedbackText(""); setFeedbackSubmitted(false); setRemainingDistance(0); if (origin) animateTo({ latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 }); }}>
               <Text style={s.primaryBtnText}>Plan Another Journey</Text>
             </TouchableOpacity>
           </View>
