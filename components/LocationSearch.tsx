@@ -66,7 +66,7 @@ export default function LocationSearch({
     setLoading(true);
     try {
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1&countrycodes=lk`,
         {
           headers: { "User-Agent": "WalkSafeApp/1.0" },
         }
