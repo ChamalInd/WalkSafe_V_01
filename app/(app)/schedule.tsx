@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
+  Modal,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Marker, Polyline } from "react-native-maps";
+import MapView, { Circle, Marker, Polyline } from "react-native-maps";
 import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -17,7 +19,7 @@ import useNearbyWalkers from "@/hooks/useNearbyWalkers";
 import LocationSearch from "@/components/LocationSearch";
 import { useTheme } from "@/contexts/ThemeContext";
 import { db } from "@/firebaseConfig";
-import { doc, updateDoc, setDoc, deleteDoc, onSnapshot, query, collection, where, addDoc, serverTimestamp, orderBy, limit, getDocs, writeBatch, getDoc } from "firebase/firestore";
+import { doc, updateDoc, setDoc, deleteDoc, onSnapshot, query, collection, where, addDoc, serverTimestamp, orderBy, limit, getDocs, writeBatch, getDoc, arrayUnion, arrayRemove, increment } from "firebase/firestore";
 import { useAuth } from "@/contexts/AuthContext";
 
 interface Point {
@@ -42,6 +44,8 @@ interface Walker {
 }
 
 const ROUTE_COLORS = ["#007AFF", "#FF9500", "#AF52DE"];
+const LEVEL_LABELS: Record<string, string> = { medium: "Medium", high: "High", risky: "Risky" };
+const LEVEL_COLORS: Record<string, string> = { medium: "#FF9500", high: "#FF3B30", risky: "#AF52DE" };
 
 function decodePolyline(encoded: string): { latitude: number; longitude: number }[] {
   const points: { latitude: number; longitude: number }[] = [];
@@ -81,6 +85,17 @@ function formatDuration(seconds: number): string {
 function formatDistance(meters: number): string {
   if (meters >= 1000) return `${(meters / 1000).toFixed(1)} km`;
   return `${Math.round(meters)} m`;
+}
+
+function countDangerZonesOnRoute(geometry: { latitude: number; longitude: number }[], zones: { latitude: number; longitude: number; level: string }[]): { count: number; levels: string[] } {
+  let count = 0;
+  const levels: string[] = [];
+  for (const zone of zones) {
+    const radius = 0.001;
+    const onRoute = geometry.some((p) => Math.abs(p.latitude - zone.latitude) < radius && Math.abs(p.longitude - zone.longitude) < radius);
+    if (onRoute) { count++; levels.push(zone.level); }
+  }
+  return { count, levels };
 }
 
 function getDistance(a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }): number {
@@ -144,6 +159,11 @@ export default function ScheduleScreen() {
   const [chatText, setChatText] = useState("");
   const chatListRef = useRef<FlatList>(null);
 
+  const [showFlagModal, setShowFlagModal] = useState(false);
+  const [flagLevel, setFlagLevel] = useState<"medium" | "high" | "risky" | null>(null);
+  const [flagging, setFlagging] = useState(false);
+  const [dangerZones, setDangerZones] = useState<{ id: string; latitude: number; longitude: number; level: string; reports: number }[]>([]);
+
   const mapRef = useRef<MapView>(null);
   const suppressRegion = useRef(false);
 
@@ -168,6 +188,33 @@ export default function ScheduleScreen() {
       });
     }
   }, [currentLocation]);
+
+  useEffect(() => {
+    if (stage !== "selecting" && stage !== "routes") return;
+    if (!currentLocation) return;
+
+    const lat = currentLocation.latitude;
+    const lon = currentLocation.longitude;
+    const latMin = lat - 0.02;
+    const latMax = lat + 0.02;
+    const lonMin = lon - 0.02;
+    const lonMax = lon + 0.02;
+
+    const q = query(
+      collection(db, "danger_zones"),
+      where("latitude", ">=", latMin),
+      where("latitude", "<=", latMax),
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      const zones = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }))
+        .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+      setDangerZones(zones);
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, currentLocation]);
 
   const checkArrival = useCallback(() => {
     if (stage !== "navigating" || !currentLocation || !destination) return;
@@ -198,6 +245,7 @@ export default function ScheduleScreen() {
         setStage("walkers");
         setSelectedWalker(null);
         deleteDoc(requestRef).catch(() => {});
+        Alert.alert("Request Declined", `${selectedWalker?.name ?? "The walker"} declined your journey request. You can try another walker.`);
       }
     }, () => {});
 
@@ -399,6 +447,131 @@ export default function ScheduleScreen() {
     return () => unsub();
   }, [stage, selectedWalker, user]);
 
+  useEffect(() => {
+    if (stage !== "navigating" || !currentLocation) return;
+
+    const latMin = currentLocation.latitude - 0.01;
+    const latMax = currentLocation.latitude + 0.01;
+    const lonMin = currentLocation.longitude - 0.01;
+    const lonMax = currentLocation.longitude + 0.01;
+
+    const q = query(
+      collection(db, "danger_zones"),
+      where("latitude", ">=", latMin),
+      where("latitude", "<=", latMax),
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      const zones = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }))
+        .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+      setDangerZones(zones);
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, currentLocation]);
+
+  async function submitFlag() {
+    if (!flagLevel || !currentLocation || !user) return;
+    setFlagging(true);
+    try {
+      const roundedLat = Math.round(currentLocation.latitude * 1000) / 1000;
+      const roundedLon = Math.round(currentLocation.longitude * 1000) / 1000;
+
+      const q = query(
+        collection(db, "danger_zones"),
+        where("latitude", "==", roundedLat),
+        where("longitude", "==", roundedLon),
+      );
+      const existing = await getDocs(q);
+
+      if (!existing.empty) {
+        const zoneDoc = existing.docs[0];
+        const data = zoneDoc.data();
+        const reporters: string[] = data.reporters ?? [];
+        if (reporters.includes(user.uid)) {
+          setShowFlagModal(false);
+          setFlagLevel(null);
+          setFlagging(false);
+          return;
+        }
+
+        const levelScore: Record<string, number> = { medium: 1, high: 2, risky: 3 };
+        const newReports = (data.reports ?? 0) + 1;
+        const allLevels = [...(data.reportedLevels ?? []), levelScore[flagLevel]];
+        const avgScore = allLevels.reduce((a: number, b: number) => a + b, 0) / allLevels.length;
+        let newLevel = "medium";
+        if (avgScore >= 2.5) newLevel = "risky";
+        else if (avgScore >= 1.5) newLevel = "high";
+
+        await updateDoc(doc(db, "danger_zones", zoneDoc.id), {
+          reports: newReports,
+          reportedLevels: allLevels,
+          level: newLevel,
+          reporters: arrayUnion(user.uid),
+          lastUpdatedAt: Date.now(),
+        });
+      } else {
+        const levelScore: Record<string, number> = { medium: 1, high: 2, risky: 3 };
+        await addDoc(collection(db, "danger_zones"), {
+          latitude: roundedLat,
+          longitude: roundedLon,
+          level: flagLevel,
+          reports: 1,
+          reportedLevels: [levelScore[flagLevel]],
+          reporters: [user.uid],
+          safeVoters: [],
+          createdAt: Date.now(),
+          lastUpdatedAt: Date.now(),
+        });
+      }
+    } catch (err) {
+      console.error("submitFlag error:", err);
+    }
+    setShowFlagModal(false);
+    setFlagLevel(null);
+    setFlagging(false);
+  }
+
+  function getExistingZone() {
+    if (!currentLocation) return null;
+    const roundedLat = Math.round(currentLocation.latitude * 1000) / 1000;
+    const roundedLon = Math.round(currentLocation.longitude * 1000) / 1000;
+    return dangerZones.find((z) => Math.round(z.latitude * 1000) / 1000 === roundedLat && Math.round(z.longitude * 1000) / 1000 === roundedLon) ?? null;
+  }
+
+  async function markAsSafe() {
+    const zone = getExistingZone();
+    if (!zone || !user) return;
+    setFlagging(true);
+    try {
+      const zoneRef = doc(db, "danger_zones", zone.id);
+      const zoneSnap = await getDoc(zoneRef);
+      if (!zoneSnap.exists()) { setFlagging(false); return; }
+      const data = zoneSnap.data();
+      const safeVoters: string[] = data.safeVoters ?? [];
+      if (safeVoters.includes(user.uid)) {
+        setFlagging(false);
+        setShowFlagModal(false);
+        return;
+      }
+      const newSafeVotes = (data.safeVoters?.length ?? 0) + 1;
+      const newReports = (data.reports ?? 1) - 1;
+      if (newReports <= 0 || newReports <= newSafeVotes) {
+        await deleteDoc(zoneRef);
+      } else {
+        await updateDoc(zoneRef, {
+          safeVoters: arrayUnion(user.uid),
+          lastUpdatedAt: Date.now(),
+        });
+      }
+    } catch (err) {
+      console.error("markAsSafe error:", err);
+    }
+    setShowFlagModal(false);
+    setFlagging(false);
+  }
+
   async function sendJourneyRequest(walker: Walker) {
     if (!user || !walker.uid) return;
     setSelectedWalker(walker);
@@ -468,12 +641,44 @@ export default function ScheduleScreen() {
       const data = await res.json();
       if (data.code !== "Ok" || !data.routes || data.routes.length === 0) { setRoutesError("No routes found between these locations."); setRoutes([]); return; }
       const parsed: Route[] = data.routes.map((r: Record<string, unknown>) => ({ distance: r.distance as number, duration: r.duration as number, geometry: decodePolyline(r.geometry as string) }));
-      setRoutes(parsed);
+
+      const latMin = Math.min(origin.latitude, destination.latitude) - 0.02;
+      const latMax = Math.max(origin.latitude, destination.latitude) + 0.02;
+      const lonMin = Math.min(origin.longitude, destination.longitude) - 0.02;
+      const lonMax = Math.max(origin.longitude, destination.longitude) + 0.02;
+      let routeDangerZones: { latitude: number; longitude: number; level: string }[] = [];
+      try {
+        const dzSnap = await getDocs(query(collection(db, "danger_zones"), where("latitude", ">=", latMin), where("latitude", "<=", latMax)));
+        routeDangerZones = dzSnap.docs
+          .map((d) => d.data() as { latitude: number; longitude: number; level: string })
+          .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+      } catch {}
+
+      const withSafety = parsed.map((route, index) => {
+        const { count, levels } = countDangerZonesOnRoute(route.geometry, routeDangerZones);
+        return { route, index, dangerCount: count, dangerLevels: levels };
+      });
+      withSafety.sort((a, b) => a.dangerCount - b.dangerCount);
+
+      const sorted = withSafety.map((w) => w.route);
+      setRoutes(sorted);
       setSelectedRoute(0);
       setStage("routes");
-      if (parsed.length > 0) {
-        const allLats = parsed.flatMap((r) => r.geometry.map((p) => p.latitude));
-        const allLngs = parsed.flatMap((r) => r.geometry.map((p) => p.longitude));
+
+      const safest = withSafety[0];
+      if (safest && safest.dangerCount > 0) {
+        const uniqueLevels = [...new Set(safest.dangerLevels)];
+        const levelLabels = uniqueLevels.map((l) => LEVEL_LABELS[l] ?? l).join(", ");
+        Alert.alert(
+          "Caution: Danger Zone Ahead",
+          `The safest route still passes through ${safest.dangerCount} reported danger area${safest.dangerCount > 1 ? "s" : ""} (${levelLabels}). Other routes may also pass through danger zones. Proceed with care.`,
+          [{ text: "Got it" }]
+        );
+      }
+
+      if (sorted.length > 0) {
+        const allLats = sorted.flatMap((r) => r.geometry.map((p) => p.latitude));
+        const allLngs = sorted.flatMap((r) => r.geometry.map((p) => p.longitude));
         animateTo({ latitude: (Math.min(...allLats) + Math.max(...allLats)) / 2, longitude: (Math.min(...allLngs) + Math.max(...allLngs)) / 2, latitudeDelta: (Math.max(...allLats) - Math.min(...allLats)) * 0.3 + 0.01, longitudeDelta: (Math.max(...allLngs) - Math.min(...allLngs)) * 0.3 + 0.01 });
       }
     } catch { setRoutesError("Failed to calculate routes. Please try again."); setRoutes([]); } finally { setRoutesLoading(false); }
@@ -512,6 +717,16 @@ export default function ScheduleScreen() {
             {origin && <Marker coordinate={{ latitude: origin.latitude, longitude: origin.longitude }} title="Start" description={origin.address} pinColor={colors.success} />}
             {destination && <Marker coordinate={{ latitude: destination.latitude, longitude: destination.longitude }} title="Destination" description={destination.address} pinColor={colors.danger} draggable={stage === "selecting"} onDragEnd={stage === "selecting" ? (e) => handleMarkerDrag(e.nativeEvent.coordinate.latitude, e.nativeEvent.coordinate.longitude) : undefined} />}
             {stage === "routes" && routes.map((route, i) => <Polyline key={i} coordinates={route.geometry} strokeColor={i === selectedRoute ? ROUTE_COLORS[i] : colors.textTertiary} strokeWidth={i === selectedRoute ? 5 : 3} />)}
+            {dangerZones.map((zone) => (
+              <Circle
+                key={zone.id}
+                center={{ latitude: zone.latitude, longitude: zone.longitude }}
+                radius={80}
+                fillColor={(LEVEL_COLORS[zone.level] ?? "#FF9500") + "33"}
+                strokeColor={LEVEL_COLORS[zone.level] ?? "#FF9500"}
+                strokeWidth={2}
+              />
+            ))}
           </MapView>
           {stage === "selecting" && !destination && <View style={[s.mapHint, { backgroundColor: colors.cardBg }]}><Ionicons name="finger-print-outline" size={16} color={colors.textSecondary} /><Text style={[s.mapHintText, { color: colors.textSecondary }]}>Tap the map or search to set destination</Text></View>}
         </View>
@@ -530,14 +745,30 @@ export default function ScheduleScreen() {
         {stage === "routes" && (<>
           {routesError ? <View style={[s.errorBanner, { backgroundColor: colors.danger + "15" }]}><Ionicons name="alert-circle" size={18} color={colors.danger} /><Text style={[s.errorBannerText, { color: colors.danger }]}>{routesError}</Text></View> : (
             <View style={s.routesSection}>
-              <Text style={[s.routesTitle, { color: colors.textSecondary }]}>{routes.length} {routes.length === 1 ? "route" : "routes"} found</Text>
-              <FlatList data={routes.slice(0, 3)} keyExtractor={(_, i) => String(i)} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.routesList} renderItem={({ item, index }) => (
-                <TouchableOpacity style={[s.routeCard, { backgroundColor: colors.cardBg }, index === selectedRoute && { backgroundColor: colors.primary + "15", borderColor: colors.primary }]} onPress={() => setSelectedRoute(index)}>
-                  <View style={s.routeCardHeader}><View style={[s.routeColorDot, { backgroundColor: ROUTE_COLORS[index] }]} /><Text style={[s.routeLabel, { color: colors.textSecondary }]}>{index === 0 ? "Fastest" : index === 1 ? "Alternative" : "Option 3"}</Text>{index === selectedRoute && <Ionicons name="checkmark-circle" size={18} color={ROUTE_COLORS[index]} />}</View>
-                  <Text style={[s.routeDistance, { color: colors.text }]}>{formatDistance(item.distance)}</Text>
-                  <Text style={[s.routeDuration, { color: colors.textSecondary }]}>{formatDuration(item.duration)}</Text>
-                </TouchableOpacity>
-              )} />
+              <Text style={[s.routesTitle, { color: colors.textSecondary }]}>{routes.length} {routes.length === 1 ? "route" : "routes"} found (sorted by safety)</Text>
+              <FlatList data={routes.slice(0, 3)} keyExtractor={(_, i) => String(i)} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.routesList} renderItem={({ item, index }) => {
+                const dz = countDangerZonesOnRoute(item.geometry, dangerZones);
+                const label = index === 0 ? "Safest" : index === 1 ? "Alternative" : "Option 3";
+                return (
+                  <TouchableOpacity style={[s.routeCard, { backgroundColor: colors.cardBg }, index === selectedRoute && { backgroundColor: colors.primary + "15", borderColor: colors.primary }]} onPress={() => setSelectedRoute(index)}>
+                    <View style={s.routeCardHeader}><View style={[s.routeColorDot, { backgroundColor: ROUTE_COLORS[index] }]} /><Text style={[s.routeLabel, { color: colors.textSecondary }]}>{label}</Text>{index === selectedRoute && <Ionicons name="checkmark-circle" size={18} color={ROUTE_COLORS[index]} />}</View>
+                    <Text style={[s.routeDistance, { color: colors.text }]}>{formatDistance(item.distance)}</Text>
+                    <Text style={[s.routeDuration, { color: colors.textSecondary }]}>{formatDuration(item.duration)}</Text>
+                    {dz.count > 0 && (
+                      <View style={[s.routeDangerBadge, { backgroundColor: "#FF3B3015" }]}>
+                        <Ionicons name="warning" size={12} color="#FF3B30" />
+                        <Text style={s.routeDangerText}>{dz.count} danger {dz.count === 1 ? "zone" : "zones"}</Text>
+                      </View>
+                    )}
+                    {dz.count === 0 && (
+                      <View style={[s.routeDangerBadge, { backgroundColor: colors.success + "15" }]}>
+                        <Ionicons name="shield-checkmark" size={12} color={colors.success} />
+                        <Text style={[s.routeDangerText, { color: colors.success }]}>Clear route</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              }} />
             </View>
           )}
           <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success }]} onPress={() => setStage("walkers")}>
@@ -715,11 +946,22 @@ export default function ScheduleScreen() {
   // ─── NAVIGATING ──────────────────────────────────────────────────
   if (stage === "navigating") {
     const activeRoute = routes[selectedRoute];
+    const levelColor: Record<string, string> = { medium: "#FF9500", high: "#FF3B30", risky: "#AF52DE" };
     return (
       <View style={s.container}>
         <MapView ref={mapRef} style={s.navMap} region={{ latitude: currentLocation?.latitude ?? 6.9271, longitude: currentLocation?.longitude ?? 79.8612, latitudeDelta: 0.005, longitudeDelta: 0.005 }} showsUserLocation>
           {activeRoute && <Polyline coordinates={activeRoute.geometry} strokeColor={colors.primary} strokeWidth={5} />}
           {destination && <Marker coordinate={{ latitude: destination.latitude, longitude: destination.longitude }} title="Destination" pinColor={colors.danger} />}
+          {dangerZones.map((zone) => (
+            <Circle
+              key={zone.id}
+              center={{ latitude: zone.latitude, longitude: zone.longitude }}
+              radius={80}
+              fillColor={(levelColor[zone.level] ?? "#FF9500") + "33"}
+              strokeColor={levelColor[zone.level] ?? "#FF9500"}
+              strokeWidth={2}
+            />
+          ))}
         </MapView>
         <View style={s.navOverlay}>
           <View style={[s.navCard, { backgroundColor: colors.cardBg }]}>
@@ -735,11 +977,104 @@ export default function ScheduleScreen() {
               {remainingDistance > 1000 ? `Continue for ${formatDistance(remainingDistance)} towards your destination` : remainingDistance > 200 ? `Almost there — ${formatDistance(remainingDistance)} remaining` : `You're very close! Look for your destination.`}
             </Text>
           </View>
-          <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.danger, marginHorizontal: 40, marginTop: 12 }]} onPress={() => setStage("feedback")}>
-            <Ionicons name="stop-circle-outline" size={18} color="#fff" />
-            <Text style={s.primaryBtnText}>End Journey</Text>
-          </TouchableOpacity>
+          <View style={s.navActionRow}>
+            <TouchableOpacity style={[s.flagBtn, { backgroundColor: colors.cardBg, borderColor: colors.warning }]} onPress={() => setShowFlagModal(true)}>
+              <Ionicons name="flag" size={18} color={colors.warning} />
+              <Text style={[s.flagBtnText, { color: colors.warning }]}>Flag Danger</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.danger, marginHorizontal: 0, flex: 1 }]} onPress={() => setStage("feedback")}>
+              <Ionicons name="stop-circle-outline" size={18} color="#fff" />
+              <Text style={s.primaryBtnText}>End Journey</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        <Modal visible={showFlagModal} transparent animationType="fade" onRequestClose={() => { setShowFlagModal(false); setFlagLevel(null); }}>
+          <View style={s.modalOverlay}>
+            <View style={[s.flagModalCard, { backgroundColor: colors.cardBg }]}>
+              {(() => {
+                const existing = getExistingZone();
+                if (existing) {
+                  const levelColors: Record<string, string> = { medium: "#FF9500", high: "#FF3B30", risky: "#AF52DE" };
+                  const levelLabels: Record<string, string> = { medium: "Medium", high: "High", risky: "Risky" };
+                  return (
+                    <>
+                      <Ionicons name="shield-checkmark" size={32} color={colors.success} />
+                      <Text style={[s.flagModalTitle, { color: colors.text }]}>Area Already Reported</Text>
+                      <Text style={[s.flagModalSub, { color: colors.textSecondary }]}>
+                        Current danger level: <Text style={{ color: levelColors[existing.level], fontWeight: "700" }}>{levelLabels[existing.level] ?? existing.level}</Text> ({existing.reports} {existing.reports === 1 ? "report" : "reports"})
+                      </Text>
+                      <View style={s.flagOptions}>
+                        <TouchableOpacity style={[s.flagOption, { borderColor: colors.success, backgroundColor: colors.success + "15" }]} onPress={markAsSafe} activeOpacity={0.6}>
+                          <Ionicons name="thumbs-up" size={22} color={colors.success} />
+                          <Text style={[s.flagOptionLabel, { color: colors.success }]}>This area is safe</Text>
+                        </TouchableOpacity>
+                        {(["medium", "high", "risky"] as const).map((level) => {
+                          const icons: Record<string, string> = { medium: "alert-circle", high: "alert", risky: "skull" };
+                          const labels: Record<string, string> = { medium: "Medium", high: "High", risky: "Risky" };
+                          const optionColors: Record<string, string> = { medium: "#FF9500", high: "#FF3B30", risky: "#AF52DE" };
+                          const selected = flagLevel === level;
+                          return (
+                            <TouchableOpacity
+                              key={level}
+                              style={[s.flagOption, { borderColor: selected ? optionColors[level] : colors.border, backgroundColor: selected ? optionColors[level] + "15" : "transparent" }]}
+                              onPress={() => setFlagLevel(level)}
+                              activeOpacity={0.6}
+                            >
+                              <Ionicons name={icons[level] as any} size={22} color={optionColors[level]} />
+                              <Text style={[s.flagOptionLabel, { color: selected ? optionColors[level] : colors.text }]}>{labels[level]}</Text>
+                              {selected && <Ionicons name="checkmark-circle" size={20} color={optionColors[level]} />}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <Ionicons name="warning" size={32} color={colors.warning} />
+                    <Text style={[s.flagModalTitle, { color: colors.text }]}>Report Dangerous Area</Text>
+                    <Text style={[s.flagModalSub, { color: colors.textSecondary }]}>Select the danger level at your current location</Text>
+                    <View style={s.flagOptions}>
+                      {(["medium", "high", "risky"] as const).map((level) => {
+                        const icons: Record<string, string> = { medium: "alert-circle", high: "alert", risky: "skull" };
+                        const labels: Record<string, string> = { medium: "Medium", high: "High", risky: "Risky" };
+                        const optionColors: Record<string, string> = { medium: "#FF9500", high: "#FF3B30", risky: "#AF52DE" };
+                        const selected = flagLevel === level;
+                        return (
+                          <TouchableOpacity
+                            key={level}
+                            style={[s.flagOption, { borderColor: selected ? optionColors[level] : colors.border, backgroundColor: selected ? optionColors[level] + "15" : "transparent" }]}
+                            onPress={() => setFlagLevel(level)}
+                            activeOpacity={0.6}
+                          >
+                            <Ionicons name={icons[level] as any} size={22} color={optionColors[level]} />
+                            <Text style={[s.flagOptionLabel, { color: selected ? optionColors[level] : colors.text }]}>{labels[level]}</Text>
+                            {selected && <Ionicons name="checkmark-circle" size={20} color={optionColors[level]} />}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </>
+                );
+              })()}
+
+              <View style={s.flagModalActions}>
+                <TouchableOpacity style={[s.flagCancelBtn, { borderColor: colors.border }]} onPress={() => { setShowFlagModal(false); setFlagLevel(null); }}>
+                  <Text style={[s.flagCancelText, { color: colors.textSecondary }]}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.flagSubmitBtn, { backgroundColor: flagLevel ? colors.warning : colors.surface }]}
+                  disabled={!flagLevel || flagging}
+                  onPress={submitFlag}
+                >
+                  {flagging ? <ActivityIndicator size="small" color="#fff" /> : <Text style={s.flagSubmitText}>Report</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -821,6 +1156,8 @@ const s = StyleSheet.create({
   routeLabel: { fontSize: 12, fontWeight: "600", flex: 1 },
   routeDistance: { fontSize: 18, fontWeight: "700" },
   routeDuration: { fontSize: 14, marginTop: 2 },
+  routeDangerBadge: { flexDirection: "row", alignItems: "center", marginTop: 6, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, gap: 4 },
+  routeDangerText: { fontSize: 11, fontWeight: "600", color: "#FF3B30" },
   errorBanner: { flexDirection: "row", alignItems: "center", marginHorizontal: 20, marginBottom: 12, borderRadius: 10, padding: 12, gap: 8 },
   errorBannerText: { fontSize: 14, flex: 1 },
   walkersHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 12 },
@@ -893,4 +1230,19 @@ const s = StyleSheet.create({
   chatInput: { flex: 1, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, fontSize: 15 },
   chatSendBtn: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
   chatBottomBar: { paddingHorizontal: 40, paddingBottom: 20, paddingTop: 4 },
+  navActionRow: { flexDirection: "row", marginHorizontal: 20, marginTop: 12, gap: 10 },
+  flagBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", borderRadius: 12, paddingVertical: 16, paddingHorizontal: 16, gap: 6, borderWidth: 1.5 },
+  flagBtnText: { fontSize: 14, fontWeight: "600" },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", paddingHorizontal: 24 },
+  flagModalCard: { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
+  flagModalTitle: { fontSize: 20, fontWeight: "700", marginTop: 12 },
+  flagModalSub: { fontSize: 14, color: "#999", marginTop: 6, textAlign: "center" },
+  flagOptions: { width: "100%", marginTop: 20, gap: 10 },
+  flagOption: { flexDirection: "row", alignItems: "center", padding: 14, borderRadius: 12, borderWidth: 1.5, gap: 12 },
+  flagOptionLabel: { flex: 1, fontSize: 16, fontWeight: "600" },
+  flagModalActions: { flexDirection: "row", marginTop: 24, gap: 12, width: "100%" },
+  flagCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center", borderWidth: 1 },
+  flagCancelText: { fontSize: 15, fontWeight: "500" },
+  flagSubmitBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center" },
+  flagSubmitText: { fontSize: 15, fontWeight: "600", color: "#fff" },
 });

@@ -157,21 +157,13 @@ export default function ProfileScreen() {
         <Text style={[styles.sectionTitle, { color: colors.textTertiary }]}>ACCOUNT</Text>
         <View style={[styles.card, { backgroundColor: colors.cardBg }]}>
           <TouchableOpacity
-            style={[styles.menuRow, { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }]}
+            style={styles.menuRow}
             onPress={() => setShowPasswordModal(true)}
             activeOpacity={0.6}
           >
             <View style={styles.menuLeft}>
               <Ionicons name="lock-closed-outline" size={20} color={colors.textSecondary} />
               <Text style={[styles.menuLabel, { color: colors.text }]}>Change Password</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuRow} activeOpacity={0.6}>
-            <View style={styles.menuLeft}>
-              <Ionicons name="notifications-outline" size={20} color={colors.textSecondary} />
-              <Text style={[styles.menuLabel, { color: colors.text }]}>Notifications</Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
           </TouchableOpacity>

@@ -11,7 +11,7 @@ import { useRouter } from "expo-router";
 import useIncomingRequest from "@/hooks/useIncomingRequest";
 import { useTheme } from "@/contexts/ThemeContext";
 import { db } from "@/firebaseConfig";
-import { doc, updateDoc, deleteDoc } from "firebase/firestore";
+import { doc, updateDoc } from "firebase/firestore";
 
 export default function JourneyRequestModal() {
   const { colors } = useTheme();
@@ -29,7 +29,9 @@ export default function JourneyRequestModal() {
 
   async function handleReject() {
     if (!incoming) return;
-    await deleteDoc(doc(db, "journey_requests", incoming.id)).catch(() => {});
+    await updateDoc(doc(db, "journey_requests", incoming.id), {
+      status: "rejected",
+    }).catch(() => {});
   }
 
   return (
