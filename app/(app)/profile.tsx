@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -15,7 +15,9 @@ import {
   reauthenticateWithCredential,
   updatePassword,
 } from "firebase/auth";
-import { doc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
+
+import { useFocusEffect } from "expo-router";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme, ThemeMode } from "@/contexts/ThemeContext";
@@ -31,6 +33,8 @@ export default function ProfileScreen() {
   const { user, profile, signOut } = useAuth();
   const { colors, mode, setMode } = useTheme();
 
+  const [userRating, setUserRating] = useState<number>(5.0);
+  const [userTotalRatings, setUserTotalRatings] = useState<number>(0);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -39,6 +43,19 @@ export default function ProfileScreen() {
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!user) return;
+      getDoc(doc(db, "users", user.uid)).then((snap) => {
+        if (snap.exists()) {
+          const d = snap.data();
+          setUserRating(d.rating ?? 5.0);
+          setUserTotalRatings(d.totalRatings ?? 0);
+        }
+      }).catch(() => {});
+    }, [user])
+  );
 
   async function handleChangePassword() {
     if (!currentPassword || !newPassword || !confirmPassword) {
@@ -105,6 +122,13 @@ export default function ProfileScreen() {
         </View>
         <Text style={[styles.name, { color: colors.text }]}>{profile?.displayName ?? "—"}</Text>
         <Text style={[styles.email, { color: colors.textTertiary }]}>{user?.email}</Text>
+        <View style={styles.ratingRow}>
+          <Ionicons name="star" size={16} color="#F5A623" />
+          <Text style={[styles.ratingText, { color: colors.text }]}>{userRating.toFixed(1)}</Text>
+          <Text style={[styles.ratingCount, { color: colors.textTertiary }]}>
+            ({userTotalRatings} {userTotalRatings === 1 ? "rating" : "ratings"})
+          </Text>
+        </View>
       </View>
 
       {/* ─── APPEARANCE ──────────────────── */}
@@ -243,6 +267,9 @@ const styles = StyleSheet.create({
   avatarText: { color: "#fff", fontSize: 32, fontWeight: "700" },
   name: { fontSize: 22, fontWeight: "700", marginTop: 14 },
   email: { fontSize: 14, marginTop: 4 },
+  ratingRow: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 4 },
+  ratingText: { fontSize: 15, fontWeight: "600" },
+  ratingCount: { fontSize: 13 },
 
   /* sections */
   section: { marginTop: 16, paddingHorizontal: 20 },

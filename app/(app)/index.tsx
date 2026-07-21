@@ -11,8 +11,9 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
+import useLiveUsers from "@/hooks/useLiveUsers";
+import useNearbyWalkers from "@/hooks/useNearbyWalkers";
 
-const ONLINE_USERS = 12;
 const DANGER_ZONES = 5;
 
 export default function HomeScreen() {
@@ -21,6 +22,11 @@ export default function HomeScreen() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const mapRef = useRef<MapView>(null);
+  const { onlineCount } = useLiveUsers();
+  const { walkers: nearbyWalkers } = useNearbyWalkers(
+    location?.coords.latitude,
+    location?.coords.longitude
+  );
 
   useEffect(() => {
     let subscription: Location.LocationSubscription | null = null;
@@ -85,13 +91,22 @@ export default function HomeScreen() {
             coordinate={{ latitude: location.coords.latitude, longitude: location.coords.longitude }}
             title="You are here"
           />
+          {nearbyWalkers.map((w) => (
+            <Marker
+              key={w.uid}
+              coordinate={{ latitude: w.latitude, longitude: w.longitude }}
+              title={w.displayName}
+              description={`${w.distanceKm} km away`}
+              pinColor={colors.primary}
+            />
+          ))}
         </MapView>
       </View>
 
       <View style={styles.statsRow}>
         <View style={[styles.statCard, { backgroundColor: colors.cardBg }]}>
           <Ionicons name="people" size={28} color={colors.primary} />
-          <Text style={[styles.statNumber, { color: colors.text }]}>{ONLINE_USERS}</Text>
+          <Text style={[styles.statNumber, { color: colors.text }]}>{onlineCount}</Text>
           <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Users Online</Text>
         </View>
         <View style={[styles.statCard, { backgroundColor: colors.cardBg }]}>

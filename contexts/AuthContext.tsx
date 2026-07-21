@@ -14,7 +14,7 @@ import {
   updateProfile,
   User,
 } from "firebase/auth";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, getDoc, serverTimestamp, setDoc, deleteDoc } from "firebase/firestore";
 import { auth, db } from "@/firebaseConfig";
 
 export type UserProfile = {
@@ -70,7 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     // Creates /users/{uid} in Firestore for this account
-    await setDoc(doc(db, "users", credential.user.uid), newProfile);
+    await setDoc(doc(db, "users", credential.user.uid), { ...newProfile, rating: 5.0, totalRatings: 0 });
     setProfile(newProfile);
   };
 
@@ -79,6 +79,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    if (user) {
+      await deleteDoc(doc(db, "live_users", user.uid)).catch(() => {});
+    }
     await firebaseSignOut(auth);
   };
 

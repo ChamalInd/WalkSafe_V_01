@@ -13,8 +13,12 @@ import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
 
 import useCurrentLocation from "@/hooks/useCurrentLocation";
+import useNearbyWalkers from "@/hooks/useNearbyWalkers";
 import LocationSearch from "@/components/LocationSearch";
 import { useTheme } from "@/contexts/ThemeContext";
+import { db } from "@/firebaseConfig";
+import { doc, updateDoc, setDoc, deleteDoc, onSnapshot, query, collection, where, addDoc, serverTimestamp, orderBy, limit, getDocs, writeBatch, getDoc } from "firebase/firestore";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface Point {
   latitude: number;
@@ -30,23 +34,14 @@ interface Route {
 
 interface Walker {
   id: string;
+  uid?: string;
   name: string;
   rating: number;
   trips: number;
+  distanceKm?: number;
 }
 
 const ROUTE_COLORS = ["#007AFF", "#FF9500", "#AF52DE"];
-
-const WALKERS: Walker[] = [
-  { id: "1", name: "Kamal Perera", rating: 4.8, trips: 124 },
-  { id: "2", name: "Nadeesha Silva", rating: 4.6, trips: 89 },
-  { id: "3", name: "Amila Fernando", rating: 4.9, trips: 201 },
-  { id: "4", name: "Dilini Rajapaksa", rating: 4.5, trips: 67 },
-  { id: "5", name: "Tharaka Bandara", rating: 4.7, trips: 153 },
-  { id: "6", name: "Hashini Liyana", rating: 4.4, trips: 42 },
-  { id: "7", name: "Chamod Weerasinghe", rating: 4.8, trips: 178 },
-  { id: "8", name: "Saduni Karunaratne", rating: 4.3, trips: 31 },
-];
 
 function decodePolyline(encoded: string): { latitude: number; longitude: number }[] {
   const points: { latitude: number; longitude: number }[] = [];
@@ -101,11 +96,25 @@ function getDistance(a: { latitude: number; longitude: number }, b: { latitude: 
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
-type Stage = "selecting" | "routes" | "walkers" | "confirmation" | "navigating" | "feedback";
+type Stage = "selecting" | "routes" | "walkers" | "requesting" | "confirmation" | "navigating" | "feedback";
 
 export default function ScheduleScreen() {
   const { colors } = useTheme();
+  const { user } = useAuth();
   const { location: currentLocation, error: locationError, loading: locationLoading } = useCurrentLocation();
+  const { walkers: nearbyWalkers, loading: walkersLoading } = useNearbyWalkers(
+    currentLocation?.latitude,
+    currentLocation?.longitude
+  );
+
+  const liveWalkers: Walker[] = nearbyWalkers.map((w) => ({
+    id: w.uid,
+    uid: w.uid,
+    name: w.displayName,
+    rating: w.rating,
+    trips: w.totalRatings,
+    distanceKm: w.distanceKm,
+  }));
 
   const [origin, setOrigin] = useState<Point | null>(null);
   const [destination, setDestination] = useState<Point | null>(null);
@@ -121,6 +130,8 @@ export default function ScheduleScreen() {
   const [routesError, setRoutesError] = useState<string | null>(null);
 
   const [selectedWalker, setSelectedWalker] = useState<Walker | null>(null);
+  const [isRequester, setIsRequester] = useState(false);
+  const [requestStatus, setRequestStatus] = useState<"pending" | "accepted" | "rejected">("pending");
   const [userConfirmed, setUserConfirmed] = useState(false);
   const [partnerConfirmed, setPartnerConfirmed] = useState(false);
 
@@ -128,6 +139,10 @@ export default function ScheduleScreen() {
   const [feedbackRating, setFeedbackRating] = useState(0);
   const [feedbackText, setFeedbackText] = useState("");
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+
+  const [chatMessages, setChatMessages] = useState<{ id: string; senderUid: string; text: string; createdAt: number }[]>([]);
+  const [chatText, setChatText] = useState("");
+  const chatListRef = useRef<FlatList>(null);
 
   const mapRef = useRef<MapView>(null);
   const suppressRegion = useRef(false);
@@ -164,21 +179,256 @@ export default function ScheduleScreen() {
   useEffect(() => { checkArrival(); }, [currentLocation, checkArrival]);
 
   useEffect(() => {
-    if (stage === "confirmation" && userConfirmed && !partnerConfirmed) {
-      const timer = setTimeout(() => setPartnerConfirmed(true), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [stage, userConfirmed, partnerConfirmed]);
+    if (stage !== "requesting" || !selectedWalker?.uid || !user) return;
+
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    const requestRef = doc(db, "journey_requests", requestId);
+
+    const unsub = onSnapshot(requestRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.status === "accepted") {
+        setRequestStatus("accepted");
+        setStage("confirmation");
+        setUserConfirmed(false);
+        setPartnerConfirmed(false);
+        if (selectedWalker?.uid) updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: true }).catch(() => {});
+      } else if (data.status === "rejected") {
+        setRequestStatus("rejected");
+        setStage("walkers");
+        setSelectedWalker(null);
+        deleteDoc(requestRef).catch(() => {});
+      }
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, selectedWalker, user]);
 
   useEffect(() => {
-    if (stage === "confirmation" && userConfirmed && partnerConfirmed) {
-      const timer = setTimeout(() => {
+    if (stage !== "confirmation" || !selectedWalker?.uid || !user) return;
+
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    const requestRef = doc(db, "journey_requests", requestId);
+
+    const unsub = onSnapshot(requestRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const myConfirmed = isRequester ? !!data.userConfirmed : !!data.partnerConfirmed;
+      const theirConfirmed = isRequester ? !!data.partnerConfirmed : !!data.userConfirmed;
+      setUserConfirmed(myConfirmed);
+      setPartnerConfirmed(theirConfirmed);
+
+      if (data.userConfirmed && data.partnerConfirmed) {
+        const messagesRef = collection(db, "journey_chats", requestId, "messages");
+        getDocs(messagesRef).then((snap) => {
+          const batch = writeBatch(db);
+          snap.docs.forEach((d) => batch.delete(d.ref));
+          batch.commit().catch(() => {});
+        }).catch(() => {});
+        setChatMessages([]);
+        setRemainingDistance(currentLocation && destination ? getDistance(currentLocation, destination) : (routes[selectedRoute]?.distance ?? 1));
         setStage("navigating");
         if (currentLocation) animateTo({ latitude: currentLocation.latitude, longitude: currentLocation.longitude, latitudeDelta: 0.005, longitudeDelta: 0.005 });
-      }, 1500);
-      return () => clearTimeout(timer);
+      }
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, selectedWalker, user, isRequester, currentLocation, routes, selectedRoute]);
+
+  async function handleConfirmArrival() {
+    if (!selectedWalker?.uid || !user) return;
+    setUserConfirmed(true);
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    await updateDoc(doc(db, "journey_requests", requestId), {
+      [isRequester ? "userConfirmed" : "partnerConfirmed"]: true,
+    }).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (stage !== "confirmation" || !selectedWalker?.uid || !user) return;
+
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    const messagesRef = collection(db, "journey_chats", requestId, "messages");
+    const q = query(messagesRef, orderBy("createdAt", "asc"), limit(50));
+
+    const unsub = onSnapshot(q, (snap) => {
+      const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() } as { id: string; senderUid: string; text: string; createdAt: number }));
+      setChatMessages(msgs);
+      setTimeout(() => chatListRef.current?.scrollToEnd({ animated: true }), 100);
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, selectedWalker, user]);
+
+  async function sendChatMessage() {
+    if (!chatText.trim() || !selectedWalker?.uid || !user) return;
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    const messagesRef = collection(db, "journey_chats", requestId, "messages");
+    const text = chatText.trim();
+    setChatText("");
+    await addDoc(messagesRef, {
+      senderUid: user.uid,
+      senderName: user.displayName ?? user.email ?? "You",
+      text,
+      createdAt: Date.now(),
+    }).catch(() => {});
+  }
+
+  async function submitFeedback() {
+    if (!selectedWalker?.uid || !user || feedbackRating === 0) return;
+
+    try {
+      await addDoc(collection(db, "feedback"), {
+        walkerUid: selectedWalker.uid,
+        reviewerUid: user.uid,
+        rating: feedbackRating,
+        comment: feedbackText.trim(),
+        createdAt: Date.now(),
+      });
+
+      const walkerRef = doc(db, "users", selectedWalker.uid);
+      const walkerSnap = await getDoc(walkerRef);
+      let updatedRating = feedbackRating;
+      let updatedTotal = 1;
+      if (walkerSnap.exists()) {
+        const d = walkerSnap.data();
+        const oldRating = d.rating ?? 5.0;
+        const oldTotal = d.totalRatings ?? 0;
+        updatedTotal = oldTotal + 1;
+        updatedRating = Math.round(((oldRating * oldTotal + feedbackRating) / updatedTotal) * 10) / 10;
+        await updateDoc(walkerRef, { rating: updatedRating, totalRatings: updatedTotal });
+      }
+
+      const liveUserSnap = await getDoc(doc(db, "live_users", selectedWalker.uid));
+      if (liveUserSnap.exists()) {
+        await updateDoc(doc(db, "live_users", selectedWalker.uid), { rating: updatedRating, totalRatings: updatedTotal });
+      }
+
+      setFeedbackSubmitted(true);
+    } catch (err) {
+      console.error("submitFeedback error:", err);
     }
-  }, [stage, userConfirmed, partnerConfirmed, currentLocation]);
+  }
+
+  useEffect(() => {
+    if (stage !== "selecting" && stage !== "routes" && stage !== "walkers") return;
+    if (!user) return;
+
+    const q = query(
+      collection(db, "journey_requests"),
+      where("partnerUid", "==", user.uid),
+      where("status", "==", "accepted")
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      if (snap.empty) return;
+      const docSnap = snap.docs[0];
+      const data = docSnap.data();
+
+      setIsRequester(false);
+      setSelectedWalker({
+        id: data.requesterUid,
+        uid: data.requesterUid,
+        name: data.requesterName,
+        rating: 0,
+        trips: 0,
+      });
+      setUserConfirmed(false);
+      setPartnerConfirmed(false);
+
+      if (data.destinationLat && data.destinationLon) {
+        const dest: Point = { latitude: data.destinationLat, longitude: data.destinationLon, address: data.destinationAddress ?? "" };
+        setDestination(dest);
+        setDestText(dest.address.split(",")[0]);
+
+        if (currentLocation) {
+          const partnerOrigin: Point = { latitude: currentLocation.latitude, longitude: currentLocation.longitude, address: "" };
+          reverseGeocode(partnerOrigin.latitude, partnerOrigin.longitude).then((addr) => {
+            partnerOrigin.address = addr;
+            setOrigin(partnerOrigin);
+            setOriginText(addr.split(",")[0]);
+
+            const coords = `${partnerOrigin.longitude},${partnerOrigin.latitude};${dest.longitude},${dest.latitude}`;
+            fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?alternatives=false&overview=full&geometries=polyline`)
+              .then((res) => res.json())
+              .then((routeData) => {
+                if (routeData.code === "Ok" && routeData.routes?.length > 0) {
+                  const parsed: Route[] = routeData.routes.map((r: Record<string, unknown>) => ({ distance: r.distance as number, duration: r.duration as number, geometry: decodePolyline(r.geometry as string) }));
+                  setRoutes(parsed);
+                  setSelectedRoute(0);
+                }
+              })
+              .catch(() => {});
+          });
+        }
+      }
+
+      updateDoc(doc(db, "live_users", data.requesterUid), { onJourney: true }).catch(() => {});
+      setStage("confirmation");
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, user, currentLocation]);
+
+  useEffect(() => {
+    if (stage !== "feedback") return;
+    if (user) {
+      updateDoc(doc(db, "live_users", user.uid), { onJourney: false }).catch(() => {});
+    }
+    if (selectedWalker?.uid && user) {
+      updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false }).catch(() => {});
+      const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+      updateDoc(doc(db, "journey_requests", requestId), { status: "completed" }).catch(() => {});
+    }
+  }, [stage, user, selectedWalker]);
+
+  useEffect(() => {
+    if (stage !== "navigating" || !selectedWalker?.uid || !user) return;
+
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    const requestRef = doc(db, "journey_requests", requestId);
+
+    const unsub = onSnapshot(requestRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.status === "completed") {
+        setStage("feedback");
+      }
+    }, () => {});
+
+    return () => unsub();
+  }, [stage, selectedWalker, user]);
+
+  async function sendJourneyRequest(walker: Walker) {
+    if (!user || !walker.uid) return;
+    setSelectedWalker(walker);
+    setIsRequester(true);
+    setRequestStatus("pending");
+    setStage("requesting");
+
+    const requestId = [user.uid, walker.uid].sort().join("_");
+    await setDoc(doc(db, "journey_requests", requestId), {
+      requesterUid: user.uid,
+      requesterName: user.displayName ?? user.email ?? "Unknown",
+      partnerUid: walker.uid,
+      partnerName: walker.name,
+      destinationLat: destination?.latitude ?? null,
+      destinationLon: destination?.longitude ?? null,
+      destinationAddress: destination?.address ?? null,
+      originLat: origin?.latitude ?? null,
+      originLon: origin?.longitude ?? null,
+      status: "pending",
+      createdAt: Date.now(),
+    }).catch(() => {});
+  }
+
+  async function handleRejectRequest() {
+    if (!selectedWalker?.uid || !user) return;
+    const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+    await deleteDoc(doc(db, "journey_requests", requestId)).catch(() => {});
+    setStage("walkers");
+    setSelectedWalker(null);
+  }
 
   async function reverseGeocode(lat: number, lon: number): Promise<string> {
     try {
@@ -305,59 +555,158 @@ export default function ScheduleScreen() {
         <View style={[s.searchSection, { backgroundColor: colors.background }]}>
           <TouchableOpacity style={s.backBtn} onPress={handleBackToRoutes}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Back</Text></TouchableOpacity>
         </View>
-        <View style={s.walkersHeader}>
+          <View style={s.walkersHeader}>
           <Ionicons name="people" size={24} color={colors.primary} />
-          <View style={{ marginLeft: 10 }}><Text style={[s.walkersTitle, { color: colors.text }]}>Available Walkers</Text><Text style={[s.walkersSubtitle, { color: colors.textTertiary }]}>{WALKERS.length} walkers online near you</Text></View>
+          <View style={{ marginLeft: 10 }}><Text style={[s.walkersTitle, { color: colors.text }]}>Available Walkers</Text><Text style={[s.walkersSubtitle, { color: colors.textTertiary }]}>{walkersLoading ? "Searching..." : `${liveWalkers.length} walkers online near you`}</Text></View>
         </View>
-        <FlatList data={WALKERS} keyExtractor={(item) => item.id} contentContainerStyle={s.walkersList} renderItem={({ item }) => (
-          <TouchableOpacity style={[s.walkerCard, { backgroundColor: colors.cardBg }]} onPress={() => { setSelectedWalker(item); setStage("confirmation"); setUserConfirmed(false); setPartnerConfirmed(false); }}>
+        {walkersLoading ? (
+          <View style={s.centered}><ActivityIndicator size="large" color={colors.primary} /><Text style={[s.loadingText, { color: colors.textSecondary }]}>Finding nearby walkers...</Text></View>
+        ) : liveWalkers.length === 0 ? (
+          <View style={s.centered}><Ionicons name="people-outline" size={48} color={colors.textTertiary} /><Text style={[s.loadingText, { color: colors.textSecondary }]}>No walkers nearby right now. Try again later.</Text></View>
+        ) : (
+        <FlatList data={liveWalkers} keyExtractor={(item) => item.id} contentContainerStyle={s.walkersList} renderItem={({ item }) => (
+          <TouchableOpacity style={[s.walkerCard, { backgroundColor: colors.cardBg }]} onPress={() => sendJourneyRequest(item)}>
             <View style={[s.walkerAvatar, { backgroundColor: colors.primary }]}><Text style={s.walkerInitial}>{item.name.charAt(0)}</Text></View>
             <View style={s.walkerInfo}>
               <Text style={[s.walkerName, { color: colors.text }]}>{item.name}</Text>
-              <View style={s.walkerMeta}><Ionicons name="star" size={12} color={colors.warning} /><Text style={[s.walkerRating, { color: colors.warning }]}>{item.rating}</Text><Text style={[s.walkerSep, { color: colors.textTertiary }]}>·</Text><Text style={[s.walkerTrips, { color: colors.textTertiary }]}>{item.trips} trips</Text></View>
+              <View style={s.walkerMeta}><Ionicons name="star" size={12} color={colors.warning} /><Text style={[s.walkerRating, { color: colors.warning }]}>{item.rating.toFixed(1)}</Text><Text style={[s.walkerSep, { color: colors.textTertiary }]}>·</Text><Text style={[s.walkerTrips, { color: colors.textTertiary }]}>{item.distanceKm != null ? `${item.distanceKm} km away` : `${item.trips} trips`}</Text></View>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
           </TouchableOpacity>
         )} />
+        )}
       </View>
     );
   }
 
   // ─── CONFIRMATION ────────────────────────────────────────────────
+  if (stage === "requesting") {
+    return (
+      <View style={[s.container, { backgroundColor: colors.background }]}>
+        <View style={[s.searchSection, { backgroundColor: colors.background }]}>
+          <TouchableOpacity style={s.backBtn} onPress={handleRejectRequest}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Cancel</Text></TouchableOpacity>
+        </View>
+        <View style={s.confirmCentered}>
+          <View style={[s.confirmCard, { backgroundColor: colors.cardBg }]}>
+            <Ionicons name="paper-plane" size={40} color={colors.primary} />
+            <Text style={[s.confirmTitle, { color: colors.text }]}>Request Sent</Text>
+            <Text style={[s.confirmSubtitle, { color: colors.textSecondary }]}>Waiting for {selectedWalker?.name} to accept your journey request...</Text>
+            <View style={[s.confirmAvatar, { backgroundColor: colors.primary, marginTop: 24 }]}>
+              <Text style={s.walkerInitial}>{selectedWalker?.name?.charAt(0)}</Text>
+            </View>
+            <Text style={[s.confirmName, { color: colors.text }]}>{selectedWalker?.name}</Text>
+            <View style={s.waitingBanner}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={[s.waitingText, { color: colors.primary }]}>Waiting for response...</Text>
+            </View>
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.danger, marginTop: 20 }]} onPress={handleRejectRequest}>
+              <Ionicons name="close-circle-outline" size={18} color="#fff" />
+              <Text style={s.primaryBtnText}>Cancel Request</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   if (stage === "confirmation") {
     return (
       <View style={[s.container, { backgroundColor: colors.background }]}>
         <View style={[s.searchSection, { backgroundColor: colors.background }]}>
-          <TouchableOpacity style={s.backBtn} onPress={() => setStage("walkers")}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Back</Text></TouchableOpacity>
+          <TouchableOpacity style={s.backBtn} onPress={() => {
+            if (selectedWalker?.uid && user) {
+              const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+              deleteDoc(doc(db, "journey_requests", requestId)).catch(() => {});
+            }
+            setStage("walkers");
+          }}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Back</Text></TouchableOpacity>
         </View>
-        <View style={s.confirmCentered}>
-          <View style={[s.confirmCard, { backgroundColor: colors.cardBg }]}>
-            <Ionicons name="hand-right" size={40} color={colors.primary} />
-            <Text style={[s.confirmTitle, { color: colors.text }]}>Meet at the Starting Point</Text>
-            <Text style={[s.confirmSubtitle, { color: colors.textSecondary }]}>Both you and {selectedWalker?.name} must confirm arrival at the meeting point before navigation begins.</Text>
-            <View style={s.confirmPeople}>
-              <View style={s.confirmPerson}>
-                <View style={[s.confirmAvatar, { backgroundColor: colors.surfaceSecondary }, userConfirmed && { backgroundColor: colors.success }]}>{userConfirmed ? <Ionicons name="checkmark" size={22} color="#fff" /> : <Ionicons name="person" size={22} color="#fff" />}</View>
-                <Text style={[s.confirmName, { color: colors.text }]}>You</Text>
-                <Text style={[s.confirmStatus, { color: colors.textTertiary }, userConfirmed && { color: colors.success }]}>{userConfirmed ? "Confirmed" : "Waiting..."}</Text>
-              </View>
-              <View style={s.confirmLine}><View style={[s.confirmLineBar, { backgroundColor: colors.surfaceSecondary }, userConfirmed && partnerConfirmed && { backgroundColor: colors.success }]} /></View>
-              <View style={s.confirmPerson}>
-                <View style={[s.confirmAvatar, { backgroundColor: colors.surfaceSecondary }, partnerConfirmed && { backgroundColor: colors.success }]}>{partnerConfirmed ? <Ionicons name="checkmark" size={22} color="#fff" /> : <Ionicons name="person" size={22} color="#fff" />}</View>
-                <Text style={[s.confirmName, { color: colors.text }]}>{selectedWalker?.name?.split(" ")[0]}</Text>
-                <Text style={[s.confirmStatus, { color: colors.textTertiary }, partnerConfirmed && { color: colors.success }]}>{partnerConfirmed ? "Confirmed" : "Waiting..."}</Text>
-              </View>
+
+        <View style={s.chatHeader}>
+          <View style={s.chatHeaderRow}>
+            <View style={[s.chatAvatar, { backgroundColor: colors.primary }]}>
+              <Text style={s.walkerInitial}>{selectedWalker?.name?.charAt(0)}</Text>
             </View>
-            {!userConfirmed ? (
-              <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success, marginHorizontal: 0, paddingVertical: 18 }]} onPress={() => setUserConfirmed(true)}>
-                <Text style={s.primaryBtnText}>I&apos;ve Arrived</Text><Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
-              </TouchableOpacity>
-            ) : !partnerConfirmed ? (
-              <View style={s.waitingBanner}><ActivityIndicator size="small" color={colors.primary} /><Text style={[s.waitingText, { color: colors.primary }]}>Waiting for {selectedWalker?.name?.split(" ")[0]}...</Text></View>
-            ) : (
-              <View style={s.bothConfirmedBanner}><Ionicons name="checkmark-done-circle" size={22} color={colors.success} /><Text style={[s.bothConfirmedText, { color: colors.success }]}>Both confirmed! Starting navigation...</Text></View>
-            )}
+            <View style={{ flex: 1 }}>
+              <Text style={[s.chatHeaderName, { color: colors.text }]}>{selectedWalker?.name}</Text>
+              <Text style={[s.chatHeaderSub, { color: colors.textTertiary }]}>Chat until you meet</Text>
+            </View>
+            <View style={s.confirmStatusPill}>
+              {userConfirmed ? (
+                <View style={[s.statusPill, { backgroundColor: colors.success + "20" }]}><Ionicons name="checkmark-circle" size={14} color={colors.success} /><Text style={[s.statusPillText, { color: colors.success }]}>You arrived</Text></View>
+              ) : (
+                <View style={[s.statusPill, { backgroundColor: colors.surfaceSecondary }]}><Ionicons name="ellipse-outline" size={14} color={colors.textTertiary} /><Text style={[s.statusPillText, { color: colors.textTertiary }]}>Not there yet</Text></View>
+              )}
+            </View>
           </View>
+          <View style={s.chatHeaderDivider} />
+          <View style={s.chatHeaderRow}>
+            <View style={[s.chatAvatar, { backgroundColor: colors.surfaceSecondary }]}>
+              <Text style={[s.walkerInitial, { color: colors.text }]}>{selectedWalker?.name?.split(" ")[0]?.charAt(0)}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.chatHeaderName, { color: colors.text }]}>{selectedWalker?.name?.split(" ")[0]}</Text>
+            </View>
+            <View>
+              {partnerConfirmed ? (
+                <View style={[s.statusPill, { backgroundColor: colors.success + "20" }]}><Ionicons name="checkmark-circle" size={14} color={colors.success} /><Text style={[s.statusPillText, { color: colors.success }]}>Arrived</Text></View>
+              ) : (
+                <View style={[s.statusPill, { backgroundColor: colors.surfaceSecondary }]}><Ionicons name="ellipse-outline" size={14} color={colors.textTertiary} /><Text style={[s.statusPillText, { color: colors.textTertiary }]}>Not there yet</Text></View>
+              )}
+            </View>
+          </View>
+        </View>
+
+        <View style={s.chatMessages}>
+          <FlatList
+            ref={chatListRef}
+            data={chatMessages}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={s.chatMessagesInner}
+            onContentSizeChange={() => chatListRef.current?.scrollToEnd({ animated: false })}
+            renderItem={({ item }) => {
+              const isMe = item.senderUid === user?.uid;
+              return (
+                <View style={[s.chatBubble, isMe ? s.chatBubbleMe : s.chatBubbleThem, { backgroundColor: isMe ? colors.primary : colors.cardBg }]}>
+                  <Text style={[s.chatBubbleText, { color: "#fff" }]}>{item.text}</Text>
+                </View>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={s.chatEmpty}>
+                <Ionicons name="chatbubble-ellipses-outline" size={32} color={colors.textTertiary} />
+                <Text style={[s.chatEmptyText, { color: colors.textTertiary }]}>Say hello! Coordinate where to meet.</Text>
+              </View>
+            }
+          />
+        </View>
+
+        <View style={[s.chatInputBar, { backgroundColor: colors.cardBg, borderTopColor: colors.border }]}>
+          <TextInput
+            style={[s.chatInput, { backgroundColor: colors.inputBg, color: colors.text }]}
+            value={chatText}
+            onChangeText={setChatText}
+            placeholder="Type a message..."
+            placeholderTextColor={colors.textTertiary}
+            returnKeyType="send"
+            onSubmitEditing={sendChatMessage}
+          />
+          <TouchableOpacity style={[s.chatSendBtn, { backgroundColor: chatText.trim() ? colors.primary : colors.surfaceSecondary }]} onPress={sendChatMessage} disabled={!chatText.trim()}>
+            <Ionicons name="send" size={18} color={chatText.trim() ? "#fff" : colors.textTertiary} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={s.chatBottomBar}>
+          {!userConfirmed ? (
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success, marginHorizontal: 0 }]} onPress={handleConfirmArrival}>
+              <Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
+              <Text style={s.primaryBtnText}>I&apos;ve Arrived</Text>
+            </TouchableOpacity>
+          ) : !partnerConfirmed ? (
+            <View style={s.waitingBanner}><ActivityIndicator size="small" color={colors.primary} /><Text style={[s.waitingText, { color: colors.primary }]}>Waiting for {selectedWalker?.name?.split(" ")[0]}...</Text></View>
+          ) : (
+            <View style={s.bothConfirmedBanner}><Ionicons name="checkmark-done-circle" size={22} color={colors.success} /><Text style={[s.bothConfirmedText, { color: colors.success }]}>Both confirmed! Starting navigation...</Text></View>
+          )}
         </View>
       </View>
     );
@@ -386,12 +735,10 @@ export default function ScheduleScreen() {
               {remainingDistance > 1000 ? `Continue for ${formatDistance(remainingDistance)} towards your destination` : remainingDistance > 200 ? `Almost there — ${formatDistance(remainingDistance)} remaining` : `You're very close! Look for your destination.`}
             </Text>
           </View>
-          <View style={s.navProgress}>
-            <View style={[s.navProgressBar, { backgroundColor: colors.surfaceSecondary }]}>
-              <View style={[s.navProgressFill, { backgroundColor: colors.primary, width: `${Math.min(100, Math.max(0, 100 - (remainingDistance / (activeRoute?.distance ?? 1)) * 100))}%` }]} />
-            </View>
-            <Text style={[s.navProgressText, { color: colors.textTertiary }]}>{Math.min(100, Math.max(0, Math.round(100 - (remainingDistance / (activeRoute?.distance ?? 1)) * 100)))}% complete</Text>
-          </View>
+          <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.danger, marginHorizontal: 40, marginTop: 12 }]} onPress={() => setStage("feedback")}>
+            <Ionicons name="stop-circle-outline" size={18} color="#fff" />
+            <Text style={s.primaryBtnText}>End Journey</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -406,7 +753,17 @@ export default function ScheduleScreen() {
             <Ionicons name="checkmark-done-circle" size={72} color={colors.success} />
             <Text style={[s.feedbackThanks, { color: colors.text }]}>Thank You!</Text>
             <Text style={[s.feedbackThanksSub, { color: colors.textSecondary }]}>Your feedback helps keep the WalkSafe community safe.</Text>
-            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.primary }]} onPress={() => { setStage("selecting"); setDestination(null); setDestText(""); setRoutes([]); setSelectedRoute(0); setSelectedWalker(null); setUserConfirmed(false); setPartnerConfirmed(false); setFeedbackRating(0); setFeedbackText(""); setFeedbackSubmitted(false); setRemainingDistance(0); if (origin) animateTo({ latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 }); }}>
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.primary }]} onPress={() => {
+              if (user) {
+                updateDoc(doc(db, "live_users", user.uid), { onJourney: false }).catch(() => {});
+              }
+              if (selectedWalker?.uid && user) {
+                updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false }).catch(() => {});
+                const requestId = [user.uid, selectedWalker.uid].sort().join("_");
+                deleteDoc(doc(db, "journey_requests", requestId)).catch(() => {});
+              }
+              setStage("selecting"); setDestination(null); setDestText(""); setRoutes([]); setSelectedRoute(0); setSelectedWalker(null); setUserConfirmed(false); setPartnerConfirmed(false); setFeedbackRating(0); setFeedbackText(""); setFeedbackSubmitted(false); setRemainingDistance(0); if (origin) animateTo({ latitude: origin.latitude, longitude: origin.longitude, latitudeDelta: 0.05, longitudeDelta: 0.05 });
+            }}>
               <Text style={s.primaryBtnText}>Plan Another Journey</Text>
             </TouchableOpacity>
           </View>
@@ -426,7 +783,7 @@ export default function ScheduleScreen() {
             </View>
             <Text style={[s.feedbackLabel, { color: colors.textSecondary }]}>Comments</Text>
             <TextInput style={[s.feedbackInput, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]} value={feedbackText} onChangeText={setFeedbackText} placeholder="Share your experience..." placeholderTextColor={colors.textTertiary} multiline numberOfLines={4} textAlignVertical="top" />
-            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success }, feedbackRating === 0 && { backgroundColor: colors.surface }]} disabled={feedbackRating === 0} onPress={() => setFeedbackSubmitted(true)}>
+            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.success }, feedbackRating === 0 && { backgroundColor: colors.surface }]} disabled={feedbackRating === 0} onPress={submitFeedback}>
               <Text style={[s.primaryBtnText, feedbackRating === 0 && { color: colors.textTertiary }]}>Submit Feedback</Text><Ionicons name="send-outline" size={18} color={feedbackRating === 0 ? colors.textTertiary : "#fff"} />
             </TouchableOpacity>
           </View>
@@ -453,7 +810,7 @@ const s = StyleSheet.create({
   locationCard: { flexDirection: "row", alignItems: "center", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
   dot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
   locationText: { fontSize: 14, flex: 1 },
-  primaryBtn: { marginHorizontal: 20, marginBottom: 34, borderRadius: 12, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  primaryBtn: { marginHorizontal: 40, marginBottom: 34, borderRadius: 12, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
   primaryBtnText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   routesSection: { paddingBottom: 8 },
   routesTitle: { fontSize: 13, fontWeight: "600", paddingHorizontal: 20, marginBottom: 8 },
@@ -504,10 +861,6 @@ const s = StyleSheet.create({
   navCardDivider: { width: 1, height: 36 },
   navInstruction: { flexDirection: "row", alignItems: "center", marginHorizontal: 20, marginTop: 12, borderRadius: 12, padding: 14, gap: 10 },
   navInstructionText: { flex: 1, fontSize: 14, lineHeight: 20 },
-  navProgress: { marginHorizontal: 20, marginTop: 12 },
-  navProgressBar: { height: 6, borderRadius: 3, overflow: "hidden" },
-  navProgressFill: { height: "100%", borderRadius: 3 },
-  navProgressText: { fontSize: 12, textAlign: "center", marginTop: 6 },
   feedbackCentered: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24 },
   feedbackCard: { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
   feedbackTitle: { fontSize: 22, fontWeight: "700", marginTop: 16 },
@@ -519,4 +872,25 @@ const s = StyleSheet.create({
   feedbackThanksSub: { fontSize: 14, textAlign: "center", marginTop: 8, marginBottom: 24 },
   loadingText: { fontSize: 16, marginTop: 12 },
   errorText: { fontSize: 16, textAlign: "center", marginTop: 12 },
+  chatHeader: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 0 },
+  chatHeaderRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10 },
+  chatHeaderDivider: { height: StyleSheet.hairlineWidth, backgroundColor: "#ccc", marginHorizontal: 4 },
+  chatAvatar: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  chatHeaderName: { fontSize: 15, fontWeight: "600" },
+  chatHeaderSub: { fontSize: 12, marginTop: 1 },
+  confirmStatusPill: {},
+  statusPill: { flexDirection: "row", alignItems: "center", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, gap: 4 },
+  statusPillText: { fontSize: 11, fontWeight: "600" },
+  chatMessages: { flex: 1, paddingHorizontal: 16 },
+  chatMessagesInner: { paddingTop: 12, paddingBottom: 8, gap: 8 },
+  chatBubble: { maxWidth: "78%", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10 },
+  chatBubbleMe: { alignSelf: "flex-end", borderBottomRightRadius: 4 },
+  chatBubbleThem: { alignSelf: "flex-start", borderBottomLeftRadius: 4 },
+  chatBubbleText: { fontSize: 15, lineHeight: 20 },
+  chatEmpty: { alignItems: "center", justifyContent: "center", paddingTop: 48, gap: 8 },
+  chatEmptyText: { fontSize: 14, textAlign: "center" },
+  chatInputBar: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 10, gap: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  chatInput: { flex: 1, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, fontSize: 15 },
+  chatSendBtn: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  chatBottomBar: { paddingHorizontal: 40, paddingBottom: 20, paddingTop: 4 },
 });

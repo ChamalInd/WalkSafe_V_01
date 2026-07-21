@@ -2,11 +2,14 @@ import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 
 import { useTheme } from "@/contexts/ThemeContext";
+import JourneyRequestModal from "@/components/JourneyRequestModal";
 
 export default function AppLayout() {
   const { colors } = useTheme();
 
   return (
+    <>
+    <JourneyRequestModal />
     <Tabs
       screenOptions={{
         headerShown: false,
@@ -46,5 +49,6 @@ export default function AppLayout() {
         }}
       />
     </Tabs>
+    </>
   );
 }
