@@ -164,6 +164,10 @@ export default function ScheduleScreen() {
   const [flagging, setFlagging] = useState(false);
   const [dangerZones, setDangerZones] = useState<{ id: string; latitude: number; longitude: number; level: string; reports: number }[]>([]);
 
+  const [showSosModal, setShowSosModal] = useState(false);
+  const [sosSending, setSosSending] = useState(false);
+  const [sosSent, setSosSent] = useState(false);
+
   const mapRef = useRef<MapView>(null);
   const suppressRegion = useRef(false);
 
@@ -572,6 +576,26 @@ export default function ScheduleScreen() {
     setFlagging(false);
   }
 
+  async function triggerSos() {
+    if (!user || !currentLocation) return;
+    setSosSending(true);
+    try {
+      await addDoc(collection(db, "sos_alerts"), {
+        uid: user.uid,
+        displayName: user.displayName ?? user.email ?? "Unknown",
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        destination: destination?.address ?? null,
+        message: "Proximity SOS — possible accident or emergency on route",
+        createdAt: Date.now(),
+      });
+      setSosSent(true);
+    } catch (err) {
+      console.error("triggerSos error:", err);
+    }
+    setSosSending(false);
+  }
+
   async function sendJourneyRequest(walker: Walker) {
     if (!user || !walker.uid) return;
     setSelectedWalker(walker);
@@ -706,10 +730,15 @@ export default function ScheduleScreen() {
     return (
       <View style={[s.container, { backgroundColor: colors.background }]}>
         <View style={[s.searchSection, { backgroundColor: colors.background }]}>
-          {stage === "routes" && <TouchableOpacity style={s.backBtn} onPress={handleBack}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Back</Text></TouchableOpacity>}
-          <LocationSearch label="Starting from" icon="radio-button-on" iconColor={colors.success} value={originText} onChangeText={setOriginText} onSelect={handleOriginSelect} placeholder="Current location" />
-          <View style={[s.divider, { backgroundColor: colors.border }]} />
-          <LocationSearch label="Going to" icon="location" iconColor={colors.danger} value={destText} onChangeText={setDestText} onSelect={handleDestSelect} placeholder="Search destination..." />
+          {stage === "routes" ? (
+            <TouchableOpacity style={s.backBtn} onPress={handleBack}><Ionicons name="arrow-back" size={20} color={colors.primary} /><Text style={[s.backBtnText, { color: colors.primary }]}>Back</Text></TouchableOpacity>
+          ) : (
+            <>
+              <LocationSearch label="Starting from" icon="radio-button-on" iconColor={colors.success} value={originText} onChangeText={setOriginText} onSelect={handleOriginSelect} placeholder="Current location" />
+              <View style={[s.divider, { backgroundColor: colors.border }]} />
+              <LocationSearch label="Going to" icon="location" iconColor={colors.danger} value={destText} onChangeText={setDestText} onSelect={handleDestSelect} placeholder="Search destination..." />
+            </>
+          )}
         </View>
 
         <View style={s.mapSection}>
@@ -963,31 +992,80 @@ export default function ScheduleScreen() {
             />
           ))}
         </MapView>
-        <View style={s.navOverlay}>
-          <View style={[s.navCard, { backgroundColor: colors.cardBg }]}>
-            <View style={s.navCardRow}>
-              <View style={s.navCardItem}><Text style={[s.navCardLabel, { color: colors.textTertiary }]}>Distance Left</Text><Text style={[s.navCardValue, { color: colors.text }]}>{formatDistance(remainingDistance)}</Text></View>
-              <View style={[s.navCardDivider, { backgroundColor: colors.border }]} />
-              <View style={s.navCardItem}><Text style={[s.navCardLabel, { color: colors.textTertiary }]}>Walking With</Text><Text style={[s.navCardValue, { color: colors.text }]}>{selectedWalker?.name?.split(" ")[0]}</Text></View>
-            </View>
+
+        {/* Top stats pill */}
+        <View style={[s.navTopPill, { backgroundColor: colors.cardBg + "E8" }]}>
+          <View style={s.navPillItem}>
+            <Ionicons name="navigate-outline" size={14} color={colors.primary} />
+            <Text style={[s.navPillValue, { color: colors.text }]}>{formatDistance(remainingDistance)}</Text>
           </View>
-          <View style={[s.navInstruction, { backgroundColor: colors.cardBg }]}>
-            <Ionicons name="navigate" size={22} color={colors.primary} />
-            <Text style={[s.navInstructionText, { color: colors.text }]} numberOfLines={2}>
-              {remainingDistance > 1000 ? `Continue for ${formatDistance(remainingDistance)} towards your destination` : remainingDistance > 200 ? `Almost there — ${formatDistance(remainingDistance)} remaining` : `You're very close! Look for your destination.`}
+          <View style={[s.navPillDivider, { backgroundColor: colors.border }]} />
+          <View style={s.navPillItem}>
+            <Ionicons name="person-outline" size={14} color={colors.primary} />
+            <Text style={[s.navPillValue, { color: colors.text }]}>{selectedWalker?.name?.split(" ")[0]}</Text>
+          </View>
+        </View>
+
+        {/* Bottom bar */}
+        <View style={s.navBottomBar}>
+          <View style={[s.navInstructionRow, { backgroundColor: colors.cardBg + "F0" }]}>
+            <Ionicons name="navigate" size={16} color={colors.primary} />
+            <Text style={[s.navInstructionInline, { color: colors.text }]} numberOfLines={1}>
+              {remainingDistance > 1000 ? `Continue ${formatDistance(remainingDistance)} to destination` : remainingDistance > 200 ? `${formatDistance(remainingDistance)} remaining` : `Arriving — look for your destination`}
             </Text>
           </View>
-          <View style={s.navActionRow}>
-            <TouchableOpacity style={[s.flagBtn, { backgroundColor: colors.cardBg, borderColor: colors.warning }]} onPress={() => setShowFlagModal(true)}>
-              <Ionicons name="flag" size={18} color={colors.warning} />
-              <Text style={[s.flagBtnText, { color: colors.warning }]}>Flag Danger</Text>
+          <View style={s.navActionsRow}>
+            <TouchableOpacity style={[s.navCircleBtn, { backgroundColor: "#FF3B30" }]} onPress={() => setShowSosModal(true)}>
+              <Ionicons name="alert-circle" size={20} color="#fff" />
             </TouchableOpacity>
-            <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.danger, marginHorizontal: 0, flex: 1 }]} onPress={() => setStage("feedback")}>
+            <TouchableOpacity style={[s.navCircleBtn, { backgroundColor: colors.cardBg, borderWidth: 1.5, borderColor: colors.warning }]} onPress={() => setShowFlagModal(true)}>
+              <Ionicons name="flag" size={18} color={colors.warning} />
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.navEndBtn, { backgroundColor: colors.danger }]} onPress={() => setStage("feedback")}>
               <Ionicons name="stop-circle-outline" size={18} color="#fff" />
-              <Text style={s.primaryBtnText}>End Journey</Text>
+              <Text style={s.navEndBtnText}>End</Text>
             </TouchableOpacity>
           </View>
         </View>
+
+        <Modal visible={showSosModal} transparent animationType="fade" onRequestClose={() => { if (!sosSending) { setShowSosModal(false); setSosSent(false); } }}>
+          <View style={s.modalOverlay}>
+            <View style={[s.sosModalCard, { backgroundColor: colors.cardBg }]}>
+              {sosSent ? (
+                <>
+                  <View style={[s.sosIconCircle, { backgroundColor: colors.success + "15" }]}>
+                    <Ionicons name="checkmark-circle" size={48} color={colors.success} />
+                  </View>
+                  <Text style={[s.sosModalTitle, { color: colors.text }]}>SOS Sent</Text>
+                  <Text style={[s.sosModalSub, { color: colors.textSecondary }]}>
+                    Admin has been notified and all nearby walkers will receive this alert. Help is on the way.
+                  </Text>
+                  <TouchableOpacity style={[s.sosDoneBtn, { backgroundColor: colors.primary }]} onPress={() => { setShowSosModal(false); setSosSent(false); }}>
+                    <Text style={s.sosDoneBtnText}>OK</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <View style={[s.sosIconCircle, { backgroundColor: colors.danger + "15" }]}>
+                    <Ionicons name="alert-circle" size={48} color={colors.danger} />
+                  </View>
+                  <Text style={[s.sosModalTitle, { color: colors.text }]}>Send Proximity SOS?</Text>
+                  <Text style={[s.sosModalSub, { color: colors.textSecondary }]}>
+                    This will notify the admin and all current walkers that an emergency has occurred at your location. Use only in genuine emergencies.
+                  </Text>
+                  <View style={s.sosModalActions}>
+                    <TouchableOpacity style={[s.sosCancelBtn, { borderColor: colors.border }]} onPress={() => { setShowSosModal(false); setSosSent(false); }} disabled={sosSending}>
+                      <Text style={[s.sosCancelText, { color: colors.textSecondary }]}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[s.sosConfirmBtn]} onPress={triggerSos} disabled={sosSending}>
+                      {sosSending ? <ActivityIndicator size="small" color="#fff" /> : <><Ionicons name="alert-circle" size={18} color="#fff" /><Text style={s.sosConfirmText}>Send SOS</Text></>}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
 
         <Modal visible={showFlagModal} transparent animationType="fade" onRequestClose={() => { setShowFlagModal(false); setFlagLevel(null); }}>
           <View style={s.modalOverlay}>
@@ -1133,19 +1211,19 @@ export default function ScheduleScreen() {
 const s = StyleSheet.create({
   container: { flex: 1 },
   centered: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24 },
-  searchSection: { paddingHorizontal: 20, paddingTop: 60, paddingBottom: 12, zIndex: 2 },
-  backBtn: { flexDirection: "row", alignItems: "center", marginBottom: 10, gap: 4 },
+  searchSection: { paddingHorizontal: 20, paddingTop: 52, paddingBottom: 6, zIndex: 2 },
+  backBtn: { flexDirection: "row", alignItems: "center", marginBottom: 6, gap: 4 },
   backBtnText: { fontSize: 15, fontWeight: "500" },
-  divider: { height: StyleSheet.hairlineWidth, marginVertical: 10, marginLeft: 28 },
+  divider: { height: StyleSheet.hairlineWidth, marginVertical: 6, marginLeft: 28 },
   mapSection: { flex: 1, marginHorizontal: 20, borderRadius: 16, overflow: "hidden" },
   map: { width: "100%", height: "100%" },
   mapHint: { position: "absolute", bottom: 16, left: 16, right: 16, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 14, flexDirection: "row", alignItems: "center" },
   mapHintText: { fontSize: 13, marginLeft: 8 },
-  infoSection: { paddingHorizontal: 20, paddingVertical: 14, gap: 8 },
-  locationCard: { flexDirection: "row", alignItems: "center", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
+  infoSection: { paddingHorizontal: 20, paddingVertical: 8, gap: 6 },
+  locationCard: { flexDirection: "row", alignItems: "center", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
   dot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
   locationText: { fontSize: 14, flex: 1 },
-  primaryBtn: { marginHorizontal: 40, marginBottom: 34, borderRadius: 12, paddingVertical: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  primaryBtn: { marginHorizontal: 40, marginBottom: 20, borderRadius: 12, paddingVertical: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
   primaryBtnText: { color: "#fff", fontSize: 16, fontWeight: "600" },
   routesSection: { paddingBottom: 8 },
   routesTitle: { fontSize: 13, fontWeight: "600", paddingHorizontal: 20, marginBottom: 8 },
@@ -1189,15 +1267,17 @@ const s = StyleSheet.create({
   bothConfirmedBanner: { flexDirection: "row", alignItems: "center", marginTop: 20, gap: 8 },
   bothConfirmedText: { fontSize: 14, fontWeight: "600" },
   navMap: { flex: 1 },
-  navOverlay: { position: "absolute", bottom: 0, left: 0, right: 0, paddingBottom: 20 },
-  navCard: { marginHorizontal: 20, borderRadius: 16, padding: 16 },
-  navCardRow: { flexDirection: "row", alignItems: "center" },
-  navCardItem: { flex: 1, alignItems: "center" },
-  navCardLabel: { fontSize: 12 },
-  navCardValue: { fontSize: 20, fontWeight: "700", marginTop: 4 },
-  navCardDivider: { width: 1, height: 36 },
-  navInstruction: { flexDirection: "row", alignItems: "center", marginHorizontal: 20, marginTop: 12, borderRadius: 12, padding: 14, gap: 10 },
-  navInstructionText: { flex: 1, fontSize: 14, lineHeight: 20 },
+  navTopPill: { position: "absolute", top: 56, alignSelf: "center", flexDirection: "row", alignItems: "center", borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8, gap: 12, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 4 },
+  navPillItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+  navPillValue: { fontSize: 14, fontWeight: "600" },
+  navPillDivider: { width: 1, height: 16 },
+  navBottomBar: { position: "absolute", bottom: 0, left: 0, right: 0, paddingHorizontal: 16, paddingBottom: 20, gap: 10 },
+  navInstructionRow: { flexDirection: "row", alignItems: "center", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, gap: 8 },
+  navInstructionInline: { flex: 1, fontSize: 13, fontWeight: "500" },
+  navActionsRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  navCircleBtn: { width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" },
+  navEndBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", borderRadius: 24, paddingVertical: 12, paddingHorizontal: 20, gap: 6 },
+  navEndBtnText: { color: "#fff", fontSize: 15, fontWeight: "600" },
   feedbackCentered: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24 },
   feedbackCard: { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
   feedbackTitle: { fontSize: 22, fontWeight: "700", marginTop: 16 },
@@ -1230,9 +1310,6 @@ const s = StyleSheet.create({
   chatInput: { flex: 1, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, fontSize: 15 },
   chatSendBtn: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
   chatBottomBar: { paddingHorizontal: 40, paddingBottom: 20, paddingTop: 4 },
-  navActionRow: { flexDirection: "row", marginHorizontal: 20, marginTop: 12, gap: 10 },
-  flagBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", borderRadius: 12, paddingVertical: 16, paddingHorizontal: 16, gap: 6, borderWidth: 1.5 },
-  flagBtnText: { fontSize: 14, fontWeight: "600" },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", paddingHorizontal: 24 },
   flagModalCard: { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
   flagModalTitle: { fontSize: 20, fontWeight: "700", marginTop: 12 },
@@ -1245,4 +1322,15 @@ const s = StyleSheet.create({
   flagCancelText: { fontSize: 15, fontWeight: "500" },
   flagSubmitBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center" },
   flagSubmitText: { fontSize: 15, fontWeight: "600", color: "#fff" },
+  sosModalCard: { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
+  sosIconCircle: { width: 80, height: 80, borderRadius: 40, alignItems: "center", justifyContent: "center" },
+  sosModalTitle: { fontSize: 20, fontWeight: "700", marginTop: 16 },
+  sosModalSub: { fontSize: 14, textAlign: "center", marginTop: 8, lineHeight: 20, paddingHorizontal: 8 },
+  sosModalActions: { flexDirection: "row", marginTop: 24, gap: 12, width: "100%" },
+  sosCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center", borderWidth: 1 },
+  sosCancelText: { fontSize: 15, fontWeight: "500" },
+  sosConfirmBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center", backgroundColor: "#FF3B30", flexDirection: "row", justifyContent: "center", gap: 6 },
+  sosConfirmText: { fontSize: 15, fontWeight: "600", color: "#fff" },
+  sosDoneBtn: { marginTop: 24, paddingVertical: 14, paddingHorizontal: 40, borderRadius: 12 },
+  sosDoneBtnText: { fontSize: 15, fontWeight: "600", color: "#fff" },
 });

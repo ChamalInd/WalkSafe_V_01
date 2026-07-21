@@ -15,7 +15,7 @@ import {
   reauthenticateWithCredential,
   updatePassword,
 } from "firebase/auth";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc, collection, query, where, getDocs } from "firebase/firestore";
 
 import { useFocusEffect } from "expo-router";
 
@@ -35,6 +35,9 @@ export default function ProfileScreen() {
 
   const [userRating, setUserRating] = useState<number>(5.0);
   const [userTotalRatings, setUserTotalRatings] = useState<number>(0);
+  const [totalJourneys, setTotalJourneys] = useState(0);
+  const [totalFriends, setTotalFriends] = useState(0);
+  const [totalReports, setTotalReports] = useState(0);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -47,6 +50,7 @@ export default function ProfileScreen() {
   useFocusEffect(
     useCallback(() => {
       if (!user) return;
+
       getDoc(doc(db, "users", user.uid)).then((snap) => {
         if (snap.exists()) {
           const d = snap.data();
@@ -54,6 +58,28 @@ export default function ProfileScreen() {
           setUserTotalRatings(d.totalRatings ?? 0);
         }
       }).catch(() => {});
+
+      const uid = user.uid;
+
+      const journeysQ = query(collection(db, "journey_requests"), where("status", "==", "completed"));
+      getDocs(journeysQ).then((snap) => {
+        const myJourneys = snap.docs.filter((d) => {
+          const data = d.data();
+          return data.requesterUid === uid || data.partnerUid === uid;
+        });
+        setTotalJourneys(myJourneys.length);
+
+        const friends = new Set<string>();
+        myJourneys.forEach((d) => {
+          const data = d.data();
+          if (data.requesterUid === uid) friends.add(data.partnerUid);
+          else friends.add(data.requesterUid);
+        });
+        setTotalFriends(friends.size);
+      }).catch(() => {});
+
+      const reportsQ = query(collection(db, "danger_zones"), where("reporters", "array-contains", uid));
+      getDocs(reportsQ).then((snap) => setTotalReports(snap.size)).catch(() => {});
     }, [user])
   );
 
@@ -128,6 +154,33 @@ export default function ProfileScreen() {
           <Text style={[styles.ratingCount, { color: colors.textTertiary }]}>
             ({userTotalRatings} {userTotalRatings === 1 ? "rating" : "ratings"})
           </Text>
+        </View>
+      </View>
+
+      {/* ─── STATS ───────────────────────── */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: colors.textTertiary }]}>STATS</Text>
+        <View style={[styles.statsGrid, { backgroundColor: colors.cardBg }]}>
+          <View style={[styles.statsCell, { borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }]}>
+            <Ionicons name="walk" size={22} color={colors.primary} />
+            <Text style={[styles.statsNum, { color: colors.text }]}>{totalJourneys}</Text>
+            <Text style={[styles.statsLabel, { color: colors.textSecondary }]}>Journeys</Text>
+          </View>
+          <View style={[styles.statsCell, { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }]}>
+            <Ionicons name="people" size={22} color={colors.success} />
+            <Text style={[styles.statsNum, { color: colors.text }]}>{totalFriends}</Text>
+            <Text style={[styles.statsLabel, { color: colors.textSecondary }]}>Friends</Text>
+          </View>
+          <View style={[styles.statsCell, { borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border }]}>
+            <Ionicons name="flag" size={22} color={colors.warning} />
+            <Text style={[styles.statsNum, { color: colors.text }]}>{totalReports}</Text>
+            <Text style={[styles.statsLabel, { color: colors.textSecondary }]}>Reports</Text>
+          </View>
+          <View style={styles.statsCell}>
+            <Ionicons name="star" size={22} color="#F5A623" />
+            <Text style={[styles.statsNum, { color: colors.text }]}>{userTotalRatings}</Text>
+            <Text style={[styles.statsLabel, { color: colors.textSecondary }]}>Reviews</Text>
+          </View>
         </View>
       </View>
 
@@ -262,6 +315,12 @@ const styles = StyleSheet.create({
   ratingRow: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 4 },
   ratingText: { fontSize: 15, fontWeight: "600" },
   ratingCount: { fontSize: 13 },
+
+  /* stats */
+  statsGrid: { borderRadius: 14, flexDirection: "row", flexWrap: "wrap", overflow: "hidden" },
+  statsCell: { width: "50%", alignItems: "center", paddingVertical: 16 },
+  statsNum: { fontSize: 24, fontWeight: "700", marginTop: 6 },
+  statsLabel: { fontSize: 12, marginTop: 2 },
 
   /* sections */
   section: { marginTop: 16, paddingHorizontal: 20 },
