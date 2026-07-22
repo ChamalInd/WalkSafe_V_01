@@ -195,30 +195,17 @@ export default function ScheduleScreen() {
 
   useEffect(() => {
     if (stage !== "selecting" && stage !== "routes") return;
-    if (!currentLocation) return;
 
-    const lat = currentLocation.latitude;
-    const lon = currentLocation.longitude;
-    const latMin = lat - 0.02;
-    const latMax = lat + 0.02;
-    const lonMin = lon - 0.02;
-    const lonMax = lon + 0.02;
-
-    const q = query(
-      collection(db, "danger_zones"),
-      where("latitude", ">=", latMin),
-      where("latitude", "<=", latMax),
-    );
-
-    const unsub = onSnapshot(q, (snap) => {
+    const unsub = onSnapshot(collection(db, "danger_zones"), (snap) => {
       const zones = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }))
-        .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }));
       setDangerZones(zones);
-    }, () => {});
+    }, (err) => {
+      console.error("Failed to load danger zones:", err);
+    });
 
     return () => unsub();
-  }, [stage, currentLocation]);
+  }, [stage]);
 
   const checkArrival = useCallback(() => {
     if (stage !== "navigating" || !currentLocation || !destination) return;
@@ -243,7 +230,7 @@ export default function ScheduleScreen() {
         setStage("confirmation");
         setUserConfirmed(false);
         setPartnerConfirmed(false);
-        if (selectedWalker?.uid) updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: true }).catch(() => {});
+        if (selectedWalker?.uid) updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: true, isOnline: true }).catch(() => {});
       } else if (data.status === "rejected") {
         setRequestStatus("rejected");
         setStage("walkers");
@@ -415,7 +402,7 @@ export default function ScheduleScreen() {
         }
       }
 
-      updateDoc(doc(db, "live_users", data.requesterUid), { onJourney: true }).catch(() => {});
+      updateDoc(doc(db, "live_users", data.requesterUid), { onJourney: true, isOnline: true }).catch(() => {});
       setStage("confirmation");
     }, () => {});
 
@@ -425,10 +412,10 @@ export default function ScheduleScreen() {
   useEffect(() => {
     if (stage !== "feedback") return;
     if (user) {
-      updateDoc(doc(db, "live_users", user.uid), { onJourney: false }).catch(() => {});
+      updateDoc(doc(db, "live_users", user.uid), { onJourney: false, isOnline: true }).catch(() => {});
     }
     if (selectedWalker?.uid && user) {
-      updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false }).catch(() => {});
+      updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false, isOnline: true }).catch(() => {});
       const requestId = [user.uid, selectedWalker.uid].sort().join("_");
       updateDoc(doc(db, "journey_requests", requestId), { status: "completed" }).catch(() => {});
     }
@@ -452,28 +439,18 @@ export default function ScheduleScreen() {
   }, [stage, selectedWalker, user]);
 
   useEffect(() => {
-    if (stage !== "navigating" || !currentLocation) return;
+    if (stage !== "navigating") return;
 
-    const latMin = currentLocation.latitude - 0.01;
-    const latMax = currentLocation.latitude + 0.01;
-    const lonMin = currentLocation.longitude - 0.01;
-    const lonMax = currentLocation.longitude + 0.01;
-
-    const q = query(
-      collection(db, "danger_zones"),
-      where("latitude", ">=", latMin),
-      where("latitude", "<=", latMax),
-    );
-
-    const unsub = onSnapshot(q, (snap) => {
+    const unsub = onSnapshot(collection(db, "danger_zones"), (snap) => {
       const zones = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }))
-        .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+        .map((d) => ({ id: d.id, ...d.data() } as { id: string; latitude: number; longitude: number; level: string; reports: number }));
       setDangerZones(zones);
-    }, () => {});
+    }, (err) => {
+      console.error("Failed to load danger zones:", err);
+    });
 
     return () => unsub();
-  }, [stage, currentLocation]);
+  }, [stage]);
 
   async function submitFlag() {
     if (!flagLevel || !currentLocation || !user) return;
@@ -1168,10 +1145,10 @@ export default function ScheduleScreen() {
             <Text style={[s.feedbackThanksSub, { color: colors.textSecondary }]}>Your feedback helps keep the WalkSafe community safe.</Text>
             <TouchableOpacity style={[s.primaryBtn, { backgroundColor: colors.primary }]} onPress={() => {
               if (user) {
-                updateDoc(doc(db, "live_users", user.uid), { onJourney: false }).catch(() => {});
+                updateDoc(doc(db, "live_users", user.uid), { onJourney: false, isOnline: true }).catch(() => {});
               }
               if (selectedWalker?.uid && user) {
-                updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false }).catch(() => {});
+                updateDoc(doc(db, "live_users", selectedWalker.uid), { onJourney: false, isOnline: true }).catch(() => {});
                 const requestId = [user.uid, selectedWalker.uid].sort().join("_");
                 deleteDoc(doc(db, "journey_requests", requestId)).catch(() => {});
               }

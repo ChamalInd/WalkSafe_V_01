@@ -50,6 +50,7 @@ export default function useNearbyWalkers(
           const data = d.data();
           if (data.uid === user!.uid) return;
           if (data.onJourney) return;
+          if (!data.isOnline) return;
           if (data.lastUpdate && Date.now() - data.lastUpdate > 300000) return;
 
           const dist = haversine(userLat, userLon, data.latitude, data.longitude);

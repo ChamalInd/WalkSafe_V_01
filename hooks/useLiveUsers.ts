@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { AppState, AppStateStatus } from "react-native";
 import * as Location from "expo-location";
 import { collection, doc, onSnapshot, setDoc, deleteDoc, getDoc } from "firebase/firestore";
 
@@ -11,17 +12,16 @@ export default function useLiveUsers() {
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const lastWriteRef = useRef({ lat: 0, lon: 0, time: 0 });
   const ratingRef = useRef({ rating: 5.0, totalRatings: 0 });
+  const appStateRef = useRef(AppState.currentState);
+  const isTrackingRef = useRef(false);
 
-  useEffect(() => {
-    if (!user) return;
-    let cancelled = false;
-
-    async function track() {
+  async function goOnline() {
+    if (!user || isTrackingRef.current) return;
+    try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted" || cancelled) return;
+      if (status !== "granted") return;
 
       const loc = await Location.getCurrentPositionAsync({});
-      if (cancelled) return;
 
       const userDoc = await getDoc(doc(db, "users", user!.uid));
       const userData = userDoc.data();
@@ -34,17 +34,18 @@ export default function useLiveUsers() {
         latitude: loc.coords.latitude,
         longitude: loc.coords.longitude,
         onJourney: false,
+        isOnline: true,
         rating: ratingRef.current.rating,
         totalRatings: ratingRef.current.totalRatings,
         lastUpdate: Date.now(),
       });
 
       lastWriteRef.current = { lat: loc.coords.latitude, lon: loc.coords.longitude, time: Date.now() };
+      isTrackingRef.current = true;
 
       watchRef.current = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 5000 },
         async (updated) => {
-          if (cancelled) return;
           const { latitude, longitude } = updated.coords;
           const prev = lastWriteRef.current;
           const dist = Math.sqrt(Math.pow(latitude - prev.lat, 2) + Math.pow(longitude - prev.lon, 2));
@@ -58,6 +59,7 @@ export default function useLiveUsers() {
               latitude,
               longitude,
               onJourney: false,
+              isOnline: true,
               rating: ratingRef.current.rating,
               totalRatings: ratingRef.current.totalRatings,
               lastUpdate: Date.now(),
@@ -65,20 +67,50 @@ export default function useLiveUsers() {
           }
         }
       );
-    }
+    } catch {}
+  }
 
-    track();
+  async function goOffline() {
+    watchRef.current?.remove();
+    watchRef.current = null;
+    isTrackingRef.current = false;
+    if (user) {
+      await deleteDoc(doc(db, "live_users", user.uid)).catch(() => {});
+    }
+  }
+
+  useEffect(() => {
+    if (!user) return;
+
+    goOnline();
+
+    const handleAppState = (next: AppStateStatus) => {
+      if (appStateRef.current.match(/active/) && next.match(/inactive|background/)) {
+        goOffline();
+      } else if (appStateRef.current.match(/inactive|background/) && next === "active") {
+        goOnline();
+      }
+      appStateRef.current = next;
+    };
+
+    const sub = AppState.addEventListener("change", handleAppState);
 
     return () => {
-      cancelled = true;
-      watchRef.current?.remove();
-      if (user) deleteDoc(doc(db, "live_users", user.uid)).catch(() => {});
+      sub.remove();
+      goOffline();
     };
   }, [user]);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, "live_users"), (snap) => {
-      setOnlineCount(snap.size);
+      let count = 0;
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.isOnline && data.lastUpdate && Date.now() - data.lastUpdate < 300000) {
+          count++;
+        }
+      });
+      setOnlineCount(count);
     }, () => {});
 
     return () => unsub();

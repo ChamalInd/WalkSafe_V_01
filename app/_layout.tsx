@@ -10,10 +10,10 @@ export const unstable_settings = {
 };
 
 function RootNavigator() {
-  const { user, initializing } = useAuth();
+  const { user, initializing, approvalStatus } = useAuth();
   const { colors } = useTheme();
 
-  if (initializing) {
+  if (initializing || (user && approvalStatus === null)) {
     return (
       <View style={[styles.loading, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.primary} />
@@ -21,10 +21,17 @@ function RootNavigator() {
     );
   }
 
+  const isApproved = !!user && approvalStatus === "approved";
+  const isPendingOrRejected = !!user && approvalStatus !== "approved";
+
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Protected guard={!!user}>
+      <Stack.Protected guard={isApproved}>
         <Stack.Screen name="(app)" />
+      </Stack.Protected>
+
+      <Stack.Protected guard={isPendingOrRejected}>
+        <Stack.Screen name="(pending)" />
       </Stack.Protected>
 
       <Stack.Protected guard={!user}>

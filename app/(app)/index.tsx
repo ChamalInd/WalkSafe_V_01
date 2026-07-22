@@ -8,7 +8,7 @@ import {
 import MapView, { Circle, Marker } from "react-native-maps";
 import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
-import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { collection, onSnapshot } from "firebase/firestore";
 
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
@@ -64,29 +64,15 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    if (!location) return;
-    const lat = location.coords.latitude;
-    const lon = location.coords.longitude;
-    const latMin = lat - 0.05;
-    const latMax = lat + 0.05;
-    const lonMin = lon - 0.05;
-    const lonMax = lon + 0.05;
-
-    const q = query(
-      collection(db, "danger_zones"),
-      where("latitude", ">=", latMin),
-      where("latitude", "<=", latMax),
-    );
-
-    const unsub = onSnapshot(q, (snap) => {
-      const zones = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() } as DangerZone))
-        .filter((z) => z.longitude >= lonMin && z.longitude <= lonMax);
+    const unsub = onSnapshot(collection(db, "danger_zones"), (snap) => {
+      const zones = snap.docs.map((d) => ({ id: d.id, ...d.data() } as DangerZone));
       setDangerZones(zones);
-    }, () => {});
+    }, (err) => {
+      console.error("Failed to load danger zones:", err);
+    });
 
     return () => unsub();
-  }, [location]);
+  }, []);
 
   if (errorMsg) {
     return (

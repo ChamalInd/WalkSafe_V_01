@@ -20,13 +20,14 @@ export default function SignupScreen() {
   const { colors } = useTheme();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSignup = async () => {
     setError(null);
-    if (!name || !email || !password) {
+    if (!name || !email || !phone || !password) {
       setError("Please fill in every field.");
       return;
     }
@@ -36,7 +37,7 @@ export default function SignupScreen() {
     }
     try {
       setLoading(true);
-      await signUp(email.trim(), password, name.trim());
+      await signUp(email.trim(), password, name.trim(), phone.trim());
     } catch (e: any) {
       setError(friendlyAuthError(e?.code));
     } finally {
@@ -67,6 +68,14 @@ export default function SignupScreen() {
         keyboardType="email-address"
         value={email}
         onChangeText={setEmail}
+      />
+      <TextInput
+        style={[styles.input, { borderColor: colors.border, color: colors.text, backgroundColor: colors.inputBg }]}
+        placeholder="Phone number"
+        placeholderTextColor={colors.textTertiary}
+        keyboardType="phone-pad"
+        value={phone}
+        onChangeText={setPhone}
       />
       <TextInput
         style={[styles.input, { borderColor: colors.border, color: colors.text, backgroundColor: colors.inputBg }]}
