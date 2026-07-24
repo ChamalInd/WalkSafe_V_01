@@ -12,6 +12,11 @@ export type IncomingRequest = {
   partnerName: string;
   status: string;
   createdAt: number;
+  originLat?: number;
+  originLon?: number;
+  destinationLat?: number;
+  destinationLon?: number;
+  destinationAddress?: string;
 };
 
 export default function useIncomingRequest() {

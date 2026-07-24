@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import useCurrentLocation from "@/hooks/useCurrentLocation";
 import useNearbyWalkers from "@/hooks/useNearbyWalkers";
+import useSosAlerts from "@/hooks/useSosAlerts";
 import LocationSearch from "@/components/LocationSearch";
 import { useTheme } from "@/contexts/ThemeContext";
 import { db } from "@/firebaseConfig";
@@ -121,6 +122,21 @@ export default function ScheduleScreen() {
     currentLocation?.latitude,
     currentLocation?.longitude
   );
+  const { alert: incomingSos, dismissAlert: dismissSosAlert } = useSosAlerts();
+
+  useEffect(() => {
+    if (!incomingSos) return;
+
+    const locationText = incomingSos.locationAddress
+      ?? `${incomingSos.latitude.toFixed(4)}, ${incomingSos.longitude.toFixed(4)}`;
+
+    Alert.alert(
+      "SOS Emergency",
+      `${incomingSos.displayName} has sent an emergency SOS!\n\nLocation: ${locationText}${incomingSos.destination ? `\nDestination: ${incomingSos.destination}` : ""}`,
+      [{ text: "Acknowledge", onPress: dismissSosAlert, style: "destructive" }],
+      { cancelable: false }
+    );
+  }, [incomingSos]);
 
   const liveWalkers: Walker[] = nearbyWalkers.map((w) => ({
     id: w.uid,
@@ -557,15 +573,46 @@ export default function ScheduleScreen() {
     if (!user || !currentLocation) return;
     setSosSending(true);
     try {
-      await addDoc(collection(db, "sos_alerts"), {
+      let locationAddress = `${currentLocation.latitude.toFixed(4)}, ${currentLocation.longitude.toFixed(4)}`;
+      try {
+        const results = await Location.reverseGeocodeAsync({
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude,
+        });
+        if (results.length > 0) {
+          const r = results[0];
+          const parts = [r.name, r.street, r.city, r.region].filter(Boolean);
+          if (parts.length > 0) locationAddress = parts.join(", ");
+        }
+      } catch {}
+
+      const sosData = {
         uid: user.uid,
         displayName: user.displayName ?? user.email ?? "Unknown",
         latitude: currentLocation.latitude,
         longitude: currentLocation.longitude,
+        locationAddress,
         destination: destination?.address ?? null,
         message: "Proximity SOS — possible accident or emergency on route",
         createdAt: Date.now(),
+      };
+
+      await addDoc(collection(db, "sos_alerts"), sosData);
+
+      const nearbySnap = await getDocs(collection(db, "live_users"));
+      const batch = writeBatch(db);
+      nearbySnap.forEach((d) => {
+        const data = d.data();
+        if (data.uid === user.uid) return;
+        if (!data.isOnline) return;
+        if (data.lastUpdate && Date.now() - data.lastUpdate > 300000) return;
+        const dist = getDistance(currentLocation, { latitude: data.latitude, longitude: data.longitude });
+        if (dist <= 10000) {
+          batch.update(d.ref, { sosAlert: sosData });
+        }
       });
+      await batch.commit();
+
       setSosSent(true);
     } catch (err) {
       console.error("triggerSos error:", err);
